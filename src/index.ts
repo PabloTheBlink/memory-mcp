@@ -16,6 +16,7 @@ import {
   upsertEdge,
   touchNode,
   setMeta,
+  getMeta,
 } from "./graph";
 import { getEmbedding, findSimilar } from "./embeddings";
 import { spreadActivation } from "./activation";
@@ -246,13 +247,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // Human-like refinement: Identify "hidden" associations (Language Agnostic)
         const STOP_WORDS = new Set(["the", "and", "for", "with", "that", "this", "los", "las", "con", "para", "que", "una", "uno", "del", "por", "des", "les", "une", "est"]);
         const queryLower = query.toLowerCase();
-        const queryTokens = queryLower.split(/[\s,.;:!?]+/).filter(t => t.length > 2 && !STOP_WORDS.has(t));
+        const queryTokens = queryLower.split(/[\s,.;:!?]+/).filter((t: string) => t.length > 2 && !STOP_WORDS.has(t));
 
         const refinedSimilar = similar.map(s => {
           const node = allNodes.find(n => n.id === s.id);
           if (!node) return s;
           const labelLower = node.label.toLowerCase();
-          const labelTokens = labelLower.split(/[\s,.;:!?]+/).filter(t => t.length > 2 && !STOP_WORDS.has(t));
+          const labelTokens = labelLower.split(/[\s,.;:!?]+/).filter((t: string) => t.length > 2 && !STOP_WORDS.has(t));
           
           const hasLexicalOverlap = labelTokens.some(t => queryTokens.includes(t)) || 
                                    (labelLower.length > 3 && queryLower.includes(labelLower));

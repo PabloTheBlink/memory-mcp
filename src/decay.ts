@@ -63,10 +63,15 @@ export function consolidate(): ConsolidationStats {
   for (const node of nodes) {
     const elapsedDays = (now - node.last_accessed_at) / (1000 * 60 * 60 * 24);
     
-    // Human-like decay: Importance and Strength create stability.
-    const stability = node.strength * (1.0 + node.importance * 5.0);
-    const retention = Math.exp(-elapsedDays / Math.max(stability, 0.01));
+    // Human-like decay: Stability increases exponentially with repetitions (Spacing Effect).
+    // An SM-2 like approach where each access increases the interval (stability).
+    const baseStability = Math.max(0.1, node.importance * 2.0);
+    const spacingMultiplier = Math.pow(1.8, Math.min(node.access_count, 15));
+    const stability = baseStability * spacingMultiplier;
     
+    const retention = Math.exp(-elapsedDays / stability);
+    
+    // Base decayed strength
     let newStrength = node.strength * retention;
 
     // Apply interference penalty if applicable
@@ -82,16 +87,20 @@ export function consolidate(): ConsolidationStats {
     if (newStrength < effectiveDeletionThreshold) {
       deleteNode(node.id);
       stats.nodesDeleted++;
-    } else if (elapsedDays < 1.0 && node.access_count > 0 && !interference) {
-      const spacingGap = Math.min(2.0, elapsedDays * 24); 
-      const reinforcement = STRENGTH_BOOST * (1.0 + node.importance) * (1.0 + Math.log1p(spacingGap));
-      
-      const boosted = Math.min(1.0, newStrength + reinforcement);
-      updateNodeStrength(node.id, boosted);
-      stats.nodesStrengthened++;
     } else {
-      updateNodeStrength(node.id, newStrength);
-      stats.nodesDecayed++;
+      // If the node was accessed very recently, we reinforce it based on its current decay state.
+      // Retrieving a memory that is close to being forgotten strengthens it more (Spacing Effect).
+      if (elapsedDays < 1.0 && node.access_count > 0 && !interference) {
+        // Inverse of retention: lower retention before recall means harder recall, thus higher boost.
+        const retrievalEffort = 1.0 + (1.0 - retention);
+        const reinforcement = STRENGTH_BOOST * (1.0 + node.importance) * retrievalEffort;
+        newStrength = Math.min(1.0, newStrength + reinforcement);
+        updateNodeStrength(node.id, newStrength);
+        stats.nodesStrengthened++;
+      } else {
+        updateNodeStrength(node.id, newStrength);
+        stats.nodesDecayed++;
+      }
     }
   }
 

@@ -157,11 +157,10 @@ export function runMaintenance(force = false): MaintenanceReport {
         ? cosineSimilarity(a.embedding, b.embedding)
         : 0;
 
-      // Human-like merge: relax text requirements if embeddings are near-identical.
-      // This helps merge "pablo" and "Pablo" but also "Cat" and "Gato" if the model supports it.
-      // For now, we only merge if text is somewhat similar OR embeddings are SUPER high.
-      const embMatch = embSim >= 0.985; // Extremely high confidence
-      const mixedMatch = embSim >= 0.96 && textSim >= 0.4; // Strong confidence + some lexical hint
+      // Language-agnostic merge: relax text requirements if embeddings are strongly similar.
+      // This helps merge "pablo" and "Pablo" but also cross-language "Cat" and "Gato".
+      const embMatch = embSim >= 0.94; // Strong semantic equivalence for synonyms/translations
+      const mixedMatch = embSim >= 0.88 && textSim >= 0.5; // Good confidence + some lexical hint
 
       if (!exactMatch && !textMatch && !embMatch && !mixedMatch) continue;
 

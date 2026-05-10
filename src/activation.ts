@@ -43,11 +43,12 @@ export async function spreadActivation(
       const edgeKey = [edge.from_id, edge.to_id].sort().join(":");
       edgeSet.set(edgeKey, { from_id: edge.from_id, to_id: edge.to_id, weight: edge.weight, type: edge.type });
 
-      // Human-like spread logic
+      // Human-like spread logic: favor semantic and conceptual links to support language agnosticism
       const typeBias = 
         edge.type === "episodic" ? 1.25 : 
-        edge.type === "temporal" ? 1.15 : 
-        edge.type === "abstraction" ? 1.1 :
+        edge.type === "semantic" ? 1.20 : 
+        edge.type === "abstraction" ? 1.15 :
+        edge.type === "temporal" ? 1.10 : 
         edge.type === "causal"   ? 1.05 : 1.0;
 
       const targetImportance = node.importance ?? 0.5;
