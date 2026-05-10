@@ -9,10 +9,18 @@ export async function spreadActivation(
   seeds: Array<{ id: string; activation: number }>,
   maxDepth: number = 3,
   decayFactor: number = 0.5,
-  threshold: number = 0.1
+  threshold: number = 0.1,
+  activeContextNodeId?: string
 ): Promise<ActivationResult> {
   const activations = new Map<string, number>();
   const edgeSet = new Map<string, { from_id: string; to_id: string; weight: number; type: string }>();
+
+  // Pre-fetch active context neighbors for efficient inhibition
+  const contextNeighbors = new Set<string>();
+  if (activeContextNodeId) {
+    contextNeighbors.add(activeContextNodeId);
+    getNeighbors(activeContextNodeId).forEach(n => contextNeighbors.add(n.node.id));
+  }
 
   for (const { id, activation } of seeds) {
     activations.set(id, activation);
@@ -23,8 +31,6 @@ export async function spreadActivation(
     ({ id, activation }) => ({ id, activation, depth: 0 })
   );
 
-  // Fatigue/Habituation: nodes that "fire" too much or have too many connections
-  // become temporarily less receptive to prevent Hub saturation.
   const fatigue = new Map<string, number>();
 
   while (queue.length > 0) {
@@ -32,10 +38,8 @@ export async function spreadActivation(
     if (depth >= maxDepth) continue;
 
     const neighbors = getNeighbors(id);
-    // Habituation: hubs (many neighbors) dissipate energy faster
     const degreePenalty = Math.max(0.7, 1.0 - (neighbors.length * 0.02));
 
-    // Lateral Inhibition: highly active nodes suppress competitors
     const currentActivation = activations.get(id) ?? 0;
     const inhibitionRadius = currentActivation > 0.8 ? 0.05 : 0;
 
@@ -43,7 +47,7 @@ export async function spreadActivation(
       const edgeKey = [edge.from_id, edge.to_id].sort().join(":");
       edgeSet.set(edgeKey, { from_id: edge.from_id, to_id: edge.to_id, weight: edge.weight, type: edge.type });
 
-      // Human-like spread logic: favor semantic and conceptual links to support language agnosticism
+      // Human-like spread logic: favor semantic and conceptual links
       const typeBias = 
         edge.type === "episodic" ? 1.25 : 
         edge.type === "semantic" ? 1.20 : 
@@ -59,11 +63,19 @@ export async function spreadActivation(
       const persistentFatigue = (now - node.last_fired_at) < 5 * 60 * 1000 ? 0.3 : 0;
       const receptivity = Math.max(0.02, 1.0 - (nodeFatigue + persistentFatigue));
 
-      // Apply lateral inhibition if the current node is dominant
-      const inhibition = inhibitionRadius * (1.0 - edge.weight);
-      
+      // Contextual Inhibition: if we have an active context, suppress nodes not associated with it.
+      // This sharpens focus and prevents "cross-talk" between unrelated memory clusters.
+      let contextInhibition = 0;
+      if (activeContextNodeId && !contextNeighbors.has(node.id)) {
+        // Label-based check for "global" nodes that shouldn't be inhibited (e.g. personal info)
+        const isGlobal = node.label.toLowerCase().includes("pablo") || node.label.includes("streak");
+        if (!isGlobal) {
+          contextInhibition = 0.4; // Strong penalty for off-context memories
+        }
+      }
+
       const effectiveDecay = decayFactor * resonance * typeBias * degreePenalty * receptivity; 
-      const spread = (activation - inhibition) * effectiveDecay * edge.weight;
+      const spread = (activation - (inhibitionRadius + contextInhibition)) * effectiveDecay * edge.weight;
       
       if (spread < threshold) continue;
 
@@ -78,7 +90,6 @@ export async function spreadActivation(
       }
     }
   }
-
 
   const nodes: ActivatedNode[] = [];
   for (const [nodeId, activation] of activations) {

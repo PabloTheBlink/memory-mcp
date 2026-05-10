@@ -271,6 +271,69 @@ export function runMaintenance(force = false): MaintenanceReport {
     }
   }
 
+  // ── Step 7: Conflict Detection (Heuristic) ───────────────────────────────
+  const NEGATION_WORDS = new Set(["no", "never", "not", "nunca", "jamas", "jamás", "neither", "nor", "tampoco"]);
+  const nodesForConflict = getAllNodes().filter(n => !n.label.startsWith("["));
+
+  for (let i = 0; i < nodesForConflict.length; i++) {
+    for (let j = i + 1; j < nodesForConflict.length; j++) {
+      const a = nodesForConflict[i], b = nodesForConflict[j];
+      if (!a.embedding || !b.embedding) continue;
+
+      const sim = cosineSimilarity(a.embedding, b.embedding);
+      if (sim < 0.82) continue; // High similarity required for potential conflict
+
+      const tokensA = a.label.toLowerCase().split(/\s+/);
+      const tokensB = b.label.toLowerCase().split(/\s+/);
+      
+      const hasNegA = tokensA.some(t => NEGATION_WORDS.has(t));
+      const hasNegB = tokensB.some(t => NEGATION_WORDS.has(t));
+
+      if (hasNegA !== hasNegB) {
+        // Potential contradiction detected (e.g. "I like coffee" vs "I do not like coffee")
+        const conflictLabel = `conflict:${a.label} VS ${b.label}`;
+        const { findOrCreateNode: createNode } = require("./graph");
+        const conflictNode = createNode(conflictLabel, null, 0.9); // High importance to draw attention
+        
+        upsertEdge(conflictNode.id, a.id, "causal", 0.5);
+        upsertEdge(conflictNode.id, b.id, "causal", 0.5);
+        
+        report.hubs.push(conflictLabel);
+      }
+    }
+  }
+
+  // ── Step 8: Curiosity Engine (Knowledge Gap Detection) ──────────────────
+  const nodesAfterConflict = getAllNodes();
+  for (const node of nodesAfterConflict) {
+    if (node.label.startsWith("[") || node.label.startsWith("concept:") || node.label.startsWith("conflict:")) continue;
+    
+    const neighbors = adjacency.get(node.id) ?? [];
+    // Curiosity trigger: Important node with very few associations
+    if (node.importance > 0.7 && neighbors.length < 2) {
+      const curiosityLabel = `curiosity:Tell me more about "${node.label}" to bridge knowledge gaps`;
+      const { findOrCreateNode: createNode } = require("./graph");
+      const curiosityNode = createNode(curiosityLabel, null, 0.4);
+      upsertEdge(curiosityNode.id, node.id, "semantic", 0.3);
+      report.hubs.push(curiosityLabel);
+    }
+  }
+
+  // ── Step 9: Importance Re-calibration (Long-term utility) ────────────────
+  // Heuristic: If a node has high access count and was used across multiple days,
+  // it is objectively important regardless of its initial importance score.
+  for (const node of nodesAfterConflict) {
+    const lifespanDays = (now - node.created_at) / (1000 * 60 * 60 * 24);
+    if (lifespanDays > 1 && node.access_count > 5) {
+      // Boost importance based on sustained utility
+      const utilityScore = Math.min(0.4, (node.access_count / lifespanDays) * 0.1);
+      const newImportance = Math.min(1.0, (node.importance || 0.5) + utilityScore);
+      if (newImportance > (node.importance || 0.5) + 0.05) {
+        updateNodeImportance(node.id, newImportance);
+      }
+    }
+  }
+
   setMeta("last_maintenance", String(now));
   report.durationMs = Date.now() - start;
   return report;

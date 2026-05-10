@@ -17,8 +17,9 @@ import {
   touchNode,
   setMeta,
   getMeta,
+  getNeighbors,
 } from "./graph";
-import { getEmbedding, findSimilar } from "./embeddings";
+import { getEmbedding, getEmbeddings, findSimilar } from "./embeddings";
 import { spreadActivation } from "./activation";
 import { consolidate } from "./decay";
 import { runMaintenance } from "./maintenance";
@@ -40,15 +41,19 @@ async function runReindexingIfNeeded() {
   process.stderr.write(`Re-indexing memory: switching from ${storedModel || "unknown"} to ${EMBEDDING_MODEL_ID}...\n`);
 
   const nodes = getAllNodes();
-  let count = 0;
-  for (const node of nodes) {
+  process.stderr.write(`Re-indexing ${nodes.length} nodes...\n`);
+  
+  const CHUNK_SIZE = 20;
+  for (let i = 0; i < nodes.length; i += CHUNK_SIZE) {
+    const chunk = nodes.slice(i, i + CHUNK_SIZE);
     try {
-      const emb = await getEmbedding(node.label);
-      updateNodeEmbedding(node.id, emb);
-      count++;
-      if (count % 20 === 0) process.stderr.write(`Progress: ${count}/${nodes.length}\n`);
+      const embeddings = await getEmbeddings(chunk.map(n => n.label));
+      for (let j = 0; j < chunk.length; j++) {
+        updateNodeEmbedding(chunk[j].id, embeddings[j]);
+      }
+      if (i % 40 === 0) process.stderr.write(`Progress: ${i}/${nodes.length}\n`);
     } catch (e) {
-      process.stderr.write(`Failed to index node "${node.label}": ${e}\n`);
+      process.stderr.write(`Failed to index batch at ${i}: ${e}\n`);
     }
   }
 
@@ -139,6 +144,18 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         required: [],
       },
     },
+    {
+      "name": "memory_replay",
+      "description": "Follow temporal and causal links to reconstruct a narrative or sequence of events starting from a concept.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "start_concept": { "type": "string" },
+          "depth": { "type": "number", "default": 5 }
+        },
+        "required": ["start_concept"],
+      },
+    },
   ],
 }));
 
@@ -192,7 +209,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           ],
           3,
           0.5,
-          0.06
+          0.06,
+          contextNodeId
         );
 
         return {
@@ -304,7 +322,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
 
         for (const { id } of seeds) touchNode(id);
-        const result = await spreadActivation(seeds, 3, 0.48, 0.05);
+        const result = await spreadActivation(seeds, 3, 0.48, 0.05, contextNodeId);
 
         const similarityMap = new Map(refinedSimilar.map((s) => [s.id, s.similarity]));
 
@@ -408,13 +426,50 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const contextNodeId = await ensureContextNode(context);
 
         // Activate context node to prime it
-        await spreadActivation([{ id: contextNodeId, activation: 1.0 }], 2, 0.5, 0.1);
+        await spreadActivation([{ id: contextNodeId, activation: 1.0 }], 2, 0.5, 0.1, contextNodeId);
 
         return {
           content: [
             {
               type: "text",
               text: JSON.stringify({ context }),
+            },
+          ],
+        };
+      }
+
+      case "memory_replay": {
+        const { start_concept, depth = 5 } = args as any;
+        const startNode = findOrCreateNode(start_concept);
+        
+        const path: string[] = [startNode.label];
+        const visited = new Set<string>([startNode.id]);
+        let currentId = startNode.id;
+
+        for (let i = 0; i < depth; i++) {
+          const neighbors = getNeighbors(currentId);
+          // Prefer temporal or causal links for narrative flow
+          const next = neighbors
+            .filter((n: any) => !visited.has(n.node.id) && !isContextNode(n.node.label))
+            .sort((a: any, b: any) => {
+              const typeScore = (t: string) => t === "temporal" ? 3 : t === "causal" ? 2 : 1;
+              return (typeScore(b.edge.type) * b.edge.weight) - (typeScore(a.edge.type) * a.edge.weight);
+            })[0];
+
+          if (!next) break;
+          path.push(`${next.edge.type === "temporal" ? "then" : "leads to"} -> ${next.node.label}`);
+          visited.add(next.node.id);
+          currentId = next.node.id;
+        }
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({ 
+                start: start_concept,
+                narrative: path 
+              }),
             },
           ],
         };

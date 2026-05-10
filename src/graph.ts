@@ -15,6 +15,7 @@ export interface MemoryNode {
   created_at: number;
   last_accessed_at: number;
   last_fired_at: number;
+  metadata: Record<string, any> | null;
 }
 
 export interface MemoryEdge {
@@ -55,7 +56,8 @@ function initSchema(db: Database.Database): void {
       access_count INTEGER NOT NULL DEFAULT 0,
       created_at INTEGER NOT NULL,
       last_accessed_at INTEGER NOT NULL,
-      last_fired_at INTEGER NOT NULL DEFAULT 0
+      last_fired_at INTEGER NOT NULL DEFAULT 0,
+      metadata TEXT
     );
 
     CREATE TABLE IF NOT EXISTS edges (
@@ -81,9 +83,20 @@ function initSchema(db: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_nodes_strength ON nodes(strength);
     CREATE INDEX IF NOT EXISTS idx_nodes_label ON nodes(label);
   `);
+
+  // Migration: Add metadata column if it doesn't exist
+  const info = db.prepare("PRAGMA table_info(nodes)").all() as any[];
+  if (!info.some(col => col.name === "metadata")) {
+    db.exec("ALTER TABLE nodes ADD COLUMN metadata TEXT");
+  }
 }
 
-export function findOrCreateNode(label: string, embedding: number[] | null = null, importance: number = 0.5): MemoryNode {
+export function findOrCreateNode(
+  label: string, 
+  embedding: number[] | null = null, 
+  importance: number = 0.5,
+  metadata: Record<string, any> | null = null
+): MemoryNode {
   const db = getDb();
   const now = Date.now();
 
@@ -94,11 +107,11 @@ export function findOrCreateNode(label: string, embedding: number[] | null = nul
 
   const id = uuidv4();
   db.prepare(`
-    INSERT INTO nodes (id, label, embedding, strength, importance, access_count, created_at, last_accessed_at, last_fired_at)
-    VALUES (?, ?, ?, 0.5, ?, 0, ?, ?, 0)
-  `).run(id, label, embedding ? JSON.stringify(embedding) : null, importance, now, now);
+    INSERT INTO nodes (id, label, embedding, strength, importance, access_count, created_at, last_accessed_at, last_fired_at, metadata)
+    VALUES (?, ?, ?, 0.5, ?, 0, ?, ?, 0, ?)
+  `).run(id, label, embedding ? JSON.stringify(embedding) : null, importance, now, now, metadata ? JSON.stringify(metadata) : null);
 
-  return { id, label, embedding, strength: 0.5, importance, access_count: 0, created_at: now, last_accessed_at: now, last_fired_at: 0 };
+  return { id, label, embedding, strength: 0.5, importance, access_count: 0, created_at: now, last_accessed_at: now, last_fired_at: 0, metadata };
 }
 
 export function getNodeById(id: string): MemoryNode | null {
@@ -246,6 +259,7 @@ function deserializeNode(row: any): MemoryNode {
     created_at: row.created_at,
     last_accessed_at: row.last_accessed_at,
     last_fired_at: row.last_fired_at ?? 0,
+    metadata: row.metadata ? JSON.parse(row.metadata) : null,
   };
 }
 

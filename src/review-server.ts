@@ -396,6 +396,8 @@ function buildGraphData() {
     importance: n.importance,
     access_count: n.access_count,
     last_accessed_at: n.last_accessed_at,
+    last_fired_at: n.last_fired_at,
+    metadata: n.metadata,
   }));
 
   const links = allEdges.map(e => ({
@@ -513,6 +515,8 @@ function renderBrain(): string {
   <div class="row"><div class="swatch" style="background:#38bdf8"></div><span>user context</span></div>
   <div id="legend-projects"></div>
   <div class="row"><div class="swatch" style="background:#94a3b8"></div><span>no context</span></div>
+  <div class="row"><div class="swatch" style="background:#ef4444"></div><span>Conflict (Resolution needed)</span></div>
+  <div class="row"><div class="swatch" style="background:#f97316"></div><span>Curiosity (Gap detected)</span></div>
   <div style="margin-top:8px; border-top:1px solid #1e2a3a; padding-top:8px">
     <div class="row"><div class="line-swatch" style="background:#fbbf24"></div><span>abstraction</span></div>
     <div class="row"><div class="line-swatch" style="background:#f97316"></div><span>causal</span></div>
@@ -561,6 +565,8 @@ fetch('/api/graph').then(r => r.json()).then(({ nodes, links, ctxNames }) => {
   });
 
   function nodeColor(n) {
+    if (n.label.startsWith('conflict:')) return '#ef4444';
+    if (n.label.startsWith('curiosity:')) return '#f97316';
     if (n.isContext) return '#8b5cf6';
     if (n.isHub) return '#fbbf24';
     if (n.contexts.length > 0) {
@@ -622,8 +628,13 @@ fetch('/api/graph').then(r => r.json()).then(({ nodes, links, ctxNames }) => {
     .attr('r', d => nodeRadius(d))
     .attr('fill', d => nodeColor(d) + (d.isContext || d.isHub ? '22' : '18'))
     .attr('stroke', d => nodeColor(d))
-    .attr('stroke-width', d => d.isContext || d.isHub ? 2 : 1.5)
-    .attr('filter', d => d.isHub ? 'url(#glow-hub)' : (d.isContext ? 'url(#glow-purple)' : 'url(#glow-blue)'));
+    .attr('stroke-width', d => d.isContext || d.isHub || d.label.startsWith('conflict:') ? 2 : 1.5)
+    .attr('filter', d => {
+      if (d.label.startsWith('conflict:')) return 'url(#glow-orange)';
+      if (d.isHub) return 'url(#glow-hub)';
+      if (d.isContext) return 'url(#glow-purple)';
+      return 'url(#glow-blue)';
+    });
 
   // Pulse ring for context nodes
   node.filter(d => d.isContext).append('circle')
@@ -705,16 +716,32 @@ fetch('/api/graph').then(r => r.json()).then(({ nodes, links, ctxNames }) => {
     node.attr('transform', d => \`translate(\${d.x},\${d.y})\`);
   });
 
-  // Animate pulse on context nodes
+  // Animate pulse on context nodes and active nodes
   function pulse() {
+    const now = Date.now();
+    
     container.selectAll('circle[stroke-dasharray]')
       .transition().duration(2000).ease(d3.easeSinInOut)
-      .attr('r', function() { return parseFloat(d3.select(this.parentNode).datum().isContext ? nodeRadius(d3.select(this.parentNode).datum()) + 12 : 0); })
+      .attr('r', function() { 
+        const d = d3.select(this.parentNode).datum();
+        return parseFloat(d.isContext ? nodeRadius(d) + 12 : 0); 
+      })
       .attr('opacity', 0.05)
       .transition().duration(2000).ease(d3.easeSinInOut)
-      .attr('r', function() { return parseFloat(d3.select(this.parentNode).datum().isContext ? nodeRadius(d3.select(this.parentNode).datum()) + 6 : 0); })
+      .attr('r', function() { 
+        const d = d3.select(this.parentNode).datum();
+        return parseFloat(d.isContext ? nodeRadius(d) + 6 : 0); 
+      })
       .attr('opacity', 0.3)
       .on('end', pulse);
+
+    // Active "fired" nodes pulse
+    node.filter(d => (now - d.last_fired_at) < 30000) // Pulse if fired in last 30s
+      .select('circle')
+      .transition().duration(800)
+      .attr('stroke-width', 4)
+      .transition().duration(800)
+      .attr('stroke-width', d => d.isContext || d.isHub ? 2 : 1.5);
   }
   pulse();
 });
