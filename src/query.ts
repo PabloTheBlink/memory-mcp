@@ -32,51 +32,65 @@ async function main() {
   try {
     const embedding = await getEmbedding(prompt);
     const allNodes = getAllNodes();
-    const similar = findSimilar(embedding, allNodes, SIM_THRESHOLD, TOP_K * 3);
+    // Scoring parameters
+    const SIM_WEIGHT = 0.50;
+    const ACT_WEIGHT = 0.35;
+    const STR_WEIGHT = 0.15;
+
+    const similar = findSimilar(embedding, allNodes, SIM_THRESHOLD, TOP_K * 4);
 
     if (similar.length < MIN_RESULTS) process.exit(0);
 
-    // Boost nodes whose label appears as a keyword in the prompt
+    // Human-like refinement: Identify "hidden" associations
+    // If a node has high semantic similarity but low lexical overlap, it might be 
+    // a translation or a deep conceptual link. We value these highly.
     const promptLower = prompt.toLowerCase();
-    const boostedSimilar = similar.map(s => {
+    const refinedSimilar = similar.map(s => {
       const node = allNodes.find(n => n.id === s.id);
-      const labelLower = node?.label.toLowerCase() ?? "";
-      // Keyword match: label word appears in prompt or vice versa
-      const words = labelLower.split(/\s+/);
-      const boost = words.some(w => w.length > 2 && promptLower.includes(w)) ? 0.3 : 0;
-      return { ...s, similarity: s.similarity + boost };
+      if (!node) return s;
+
+      const labelLower = node.label.toLowerCase();
+      const hasLexicalOverlap = labelLower.split(/\s+/).some(w => w.length > 2 && promptLower.includes(w));
+      
+      // If high similarity (>0.6) but NO lexical overlap, it's a likely translation or conceptual link.
+      // We give it a "Cognitive Insight" boost.
+      const insightBoost = (!hasLexicalOverlap && s.similarity > 0.6) ? 0.15 : 0;
+      
+      // Small boost for exact substring matches (still useful for names/technical terms)
+      const lexicalBoost = hasLexicalOverlap ? 0.1 : 0;
+
+      return { ...s, similarity: Math.min(1.0, s.similarity + insightBoost + lexicalBoost) };
     }).sort((a, b) => b.similarity - a.similarity);
 
-    const seedIds = boostedSimilar.slice(0, 5).map(s => ({ id: s.id, activation: 1.0 }));
-    const result = await spreadActivation(seedIds, 2, 0.5, 0.1);
+    const seedIds = refinedSimilar.slice(0, 5).map(s => ({ id: s.id, activation: 1.0 }));
+    const result = await spreadActivation(seedIds, 2, 0.45, 0.08);
 
-    const simMap = new Map(boostedSimilar.map(s => [s.id, s.similarity]));
-    const keywordMatchedIds = new Set(
-      boostedSimilar.filter(s => s.similarity > SIM_THRESHOLD + 0.25).map(s => s.id)
-    );
+    const simMap = new Map(refinedSimilar.map(s => [s.id, s.similarity]));
+    const baseSimMap = new Map(similar.map(s => [s.id, s.similarity]));
 
-    // Code file labels (e.g. planner.ts, loop.ts) are noisy — the embedding model
-    // gives them high similarity to any short query. Only include them if they
-    // were directly keyword-matched.
-    const CODE_FILE_RE = /\.(ts|js|tsx|jsx|py|php|rb|go|rs|sh)$/i;
+    // Filter and rank
+    const CODE_FILE_RE = /\.(ts|js|tsx|jsx|py|php|rb|go|rs|sh|md|json)$/i;
 
     const ranked = result.nodes
       .filter(n => !n.label.startsWith("[ctx:"))
       .filter(n => {
         const sim = simMap.get(n.id) ?? 0;
-        if (sim <= 0.01) return false;
-        // Filter out code-file nodes unless keyword matched
-        if (CODE_FILE_RE.test(n.label) && !keywordMatchedIds.has(n.id)) return false;
-        // Non-keyword-matched nodes need a reasonably high base similarity
-        const baseSimMap = new Map(similar.map(s => [s.id, s.similarity]));
         const baseSim = baseSimMap.get(n.id) ?? 0;
-        if (!keywordMatchedIds.has(n.id) && baseSim < 0.42) return false;
-        return true;
+        
+        // Noise reduction for code files and technical nodes
+        if (CODE_FILE_RE.test(n.label)) {
+          return baseSim > 0.75 || promptLower.includes(n.label.toLowerCase());
+        }
+
+        // General relevance threshold
+        return sim > 0.35 || n.activation > 0.4;
       })
       .map(n => ({
         id: n.id,
         label: n.label,
-        score: (simMap.get(n.id) ?? 0) * 0.6 + n.activation * 0.3 + n.strength * 0.1,
+        score: (simMap.get(n.id) ?? 0) * SIM_WEIGHT + 
+               n.activation * ACT_WEIGHT + 
+               n.strength * STR_WEIGHT,
       }))
       .sort((a, b) => b.score - a.score)
       .slice(0, TOP_K);
@@ -105,19 +119,19 @@ async function main() {
         .slice(0, 5)
         .map(nb => ({ label: nodeMap.get(nb.id)!, weight: nb.weight }));
 
-      // High-weight neighbors (≥0.5) read as "type" descriptors
-      const types   = neighbors.filter(nb => nb.weight >= 0.5).map(nb => nb.label);
+      // High-weight neighbors (≥0.45) read as "type" descriptors or strong associations
+      const types   = neighbors.filter(nb => nb.weight >= 0.45).map(nb => nb.label);
       // Medium-weight are contextual relationships
-      const related = neighbors.filter(nb => nb.weight >= 0.3 && nb.weight < 0.5).map(nb => nb.label);
+      const related = neighbors.filter(nb => nb.weight >= 0.2 && nb.weight < 0.45).map(nb => nb.label);
 
       let card = `▸ ${n.label}`;
-      if (types.length   > 0) card += `\n  is: ${types.join(", ")}`;
+      if (types.length   > 0) card += `\n  is/of: ${types.join(", ")}`;
       if (related.length > 0) card += `\n  related: ${related.join(", ")}`;
       return card;
     });
 
     const context = [
-      `[Personal Memory — verified context for this user. Use this directly; do NOT search the web for these concepts.]`,
+      `[Memory Context — Associative recall optimized for current intent. Direct usage recommended.]`,
       ``,
       ...cards,
     ].join("\n");

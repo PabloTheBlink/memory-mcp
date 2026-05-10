@@ -141,24 +141,32 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const allNodes = getAllNodes();
         const similar = findSimilar(node.embedding!, allNodes, 0.75, 20).filter((s) => s.id !== node.id);
         for (const s of similar.slice(0, 5)) {
-          upsertEdge(node.id, s.id, "semantic", s.similarity * 0.1);
+          upsertEdge(node.id, s.id, "semantic", s.similarity * 0.15);
         }
 
-        // Bind to active context (episodic encoding — this happened here)
+        // Human-like: Temporal Co-occurrence (Episodic memory)
+        // Link to recently activated nodes in this context
+        const lastActivatedId = getMeta(`last_act_${activeContext}`);
+        if (lastActivatedId && lastActivatedId !== node.id) {
+          upsertEdge(node.id, lastActivatedId, "temporal", 0.2);
+        }
+        setMeta(`last_act_${activeContext}`, node.id);
+
+        // Bind to active context
         const contextNodeId = await ensureContextNode(activeContext);
         bindToContext(node.id, contextNodeId);
 
         touchNode(node.id);
 
-        // Spread from concept (full activation) + context hub (partial, like environmental priming)
+        // Spread activation
         const result = await spreadActivation(
           [
             { id: node.id, activation: 1.0 },
-            { id: contextNodeId, activation: 0.3 },
+            { id: contextNodeId, activation: 0.35 },
           ],
           3,
           0.5,
-          0.1
+          0.08
         );
 
         return {
@@ -172,10 +180,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                     nodes: result.nodes
                       .filter((n) => !isContextNode(n.label))
                       .map((n) => ({ label: n.label, strength: Math.round(n.strength * 100) / 100 })),
-                    context: result.nodes
-                      .filter((n) => isContextNode(n.label))
-                      .map((n) => n.label),
-                    edges: result.edges.map(e => {
+                    edges: result.edges.slice(0, 10).map(e => {
                       const from = result.nodes.find(n => n.id === e.from_id)?.label;
                       const to = result.nodes.find(n => n.id === e.to_id)?.label;
                       return `${from} --(${e.type})--> ${to}`;
@@ -203,8 +208,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           updateNodeEmbedding(nodeB.id, emb);
         }
 
-        const boost = strength !== undefined ? strength * 0.2 : 0.1;
-        const edge = upsertEdge(nodeA.id, nodeB.id, type, boost);
+        const boost = strength !== undefined ? strength * 0.25 : 0.15;
+        upsertEdge(nodeA.id, nodeB.id, type, boost);
 
         // Bind both to context
         const contextNodeId = await ensureContextNode(activeContext);
@@ -234,50 +239,57 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         const queryEmbedding = await getEmbedding(query);
         const allNodes = getAllNodes();
-        // 0.35 threshold handles cross-language queries (e.g. Spanish query → English nodes)
-        const similar = findSimilar(queryEmbedding, allNodes, 0.35, top_k * 2);
+        
+        // 0.32 threshold for cross-language recall
+        const similar = findSimilar(queryEmbedding, allNodes, 0.32, top_k * 3);
 
-        // Context hub gets medium activation — it primes context-relevant memories
-        // without blocking cross-context ones (like remembering work things at home)
+        // Human-like refinement for language-agnosticism (Insight boost)
+        const queryLower = query.toLowerCase();
+        const refinedSimilar = similar.map(s => {
+          const node = allNodes.find(n => n.id === s.id);
+          if (!node) return s;
+          const labelLower = node.label.toLowerCase();
+          const words = labelLower.split(/\s+/);
+          const hasLexicalOverlap = words.some(w => w.length > 2 && queryLower.includes(w));
+          
+          // Boost if semantically strong but lexically different (likely translation/deep concept)
+          const insightBoost = (!hasLexicalOverlap && s.similarity > 0.6) ? 0.12 : 0;
+          return { ...s, similarity: Math.min(1.0, s.similarity + insightBoost) };
+        }).sort((a, b) => b.similarity - a.similarity);
+
         const contextNodeId = await ensureContextNode(activeContext);
         const seeds: Array<{ id: string; activation: number }> = [
-          { id: contextNodeId, activation: 0.4 },
-          ...similar.slice(0, 5).map((s) => ({ id: s.id, activation: 1.0 })),
+          { id: contextNodeId, activation: 0.45 }, // Stronger context priming
+          ...refinedSimilar.slice(0, 5).map((s) => ({ id: s.id, activation: 1.0 })),
         ];
 
         if (seeds.length === 1) {
-          // Only context seed — no semantic matches at all
           return {
             content: [{ type: "text", text: JSON.stringify({ query, context: activeContext, results: [] }) }],
           };
         }
 
         for (const { id } of seeds) touchNode(id);
-        const result = await spreadActivation(seeds, 3, 0.5, 0.05);
+        const result = await spreadActivation(seeds, 3, 0.5, 0.06);
 
-        const similarityMap = new Map(similar.map((s) => [s.id, s.similarity]));
+        const similarityMap = new Map(refinedSimilar.map((s) => [s.id, s.similarity]));
 
         const ranked = result.nodes
           .filter((n) => !isContextNode(n.label))
           .map((n) => ({
             id: n.id,
             label: n.label,
-            // Relevance blends semantic similarity, spreading activation, and node strength
             relevance_score:
-              (similarityMap.get(n.id) ?? 0) * 0.45 + // Semantic match
-              n.activation * 0.30 +                 // Contextual activation
-              n.strength * 0.15 +                   // Persistence
-              n.importance * 0.10,                  // Significance
-            semantic_similarity: similarityMap.get(n.id) ?? 0,
-            activation: n.activation,
-            strength: n.strength,
-            importance: n.importance,
+              (similarityMap.get(n.id) ?? 0) * 0.45 + 
+              n.activation * 0.30 +                 
+              n.strength * 0.15 +                   
+              n.importance * 0.10,                  
+            connected_to: [] as string[]
           }))
           .sort((a, b) => b.relevance_score - a.relevance_score)
           .slice(0, top_k);
 
-        // Include 1-hop neighbors for each result so small models can
-        // read "name → Pablo" without needing a second tool call.
+        // Build adjacency
         const nodeMap = new Map(allNodes.map((n) => [n.id, n.label]));
         const allEdgesForRecall = getAllEdges();
         const adjacency = new Map<string, Array<{ label: string; weight: number }>>();
@@ -292,19 +304,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             adjacency.get(e.to_id)!.push({ label: toLabel, weight: e.weight });
         }
 
-        // Reinforce associations with the active context for the top results (episodic learning)
+        // Reinforce associations
         const contextNodeIdForReinforcement = await ensureContextNode(activeContext);
         for (const n of ranked.slice(0, 3)) {
-          upsertEdge(n.id, contextNodeIdForReinforcement, "episodic", 0.05);
-        }
-
-        const rankedWithNeighbors = ranked.map((n) => ({
-          ...n,
-          connected_to: (adjacency.get(n.id) ?? [])
+          upsertEdge(n.id, contextNodeIdForReinforcement, "episodic", 0.08);
+          n.connected_to = (adjacency.get(n.id) ?? [])
             .sort((a, b) => b.weight - a.weight)
             .slice(0, 5)
-            .map((nb) => nb.label),
-        }));
+            .map((nb) => nb.label);
+        }
 
         return {
           content: [
@@ -313,7 +321,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               text: JSON.stringify({
                   query,
                   context: activeContext,
-                  results: rankedWithNeighbors.map(r => ({
+                  results: ranked.map(r => ({
                     label: r.label,
                     relevance: Math.round(r.relevance_score * 100) / 100,
                     connected: r.connected_to

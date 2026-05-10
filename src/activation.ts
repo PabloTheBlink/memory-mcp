@@ -31,17 +31,29 @@ export async function spreadActivation(
       const edgeKey = [edge.from_id, edge.to_id].sort().join(":");
       edgeSet.set(edgeKey, { from_id: edge.from_id, to_id: edge.to_id, weight: edge.weight, type: edge.type });
 
-      // Human-like spread: Important nodes attract and sustain activation better.
+      // Human-like spread: 
+      // 1. Edge Type Bias: Episodic/Temporal links are strong contextual bridges.
+      const typeBias = 
+        edge.type === "episodic" ? 1.2 : 
+        edge.type === "temporal" ? 1.1 : 
+        edge.type === "causal"   ? 1.05 : 1.0;
+
+      // 2. Importance Resonance: Important nodes attract and sustain energy.
       const targetImportance = node.importance ?? 0.5;
-      const effectiveDecay = decayFactor * (0.9 + targetImportance * 0.2); 
+      const resonance = 0.9 + (targetImportance * 0.3); 
+      
+      const effectiveDecay = decayFactor * resonance * typeBias; 
       const spread = activation * effectiveDecay * edge.weight;
       
       if (spread < threshold) continue;
 
       const current = activations.get(node.id) ?? 0;
-      if (spread > current) {
-        activations.set(node.id, spread);
-        queue.push({ id: node.id, activation: spread, depth: depth + 1 });
+      // Activation accumulates slightly (like neurons summing input)
+      const nextActivation = Math.min(1.2, current + (spread * 0.8));
+
+      if (nextActivation > current + 0.05) {
+        activations.set(node.id, nextActivation);
+        queue.push({ id: node.id, activation: nextActivation, depth: depth + 1 });
       }
     }
   }
