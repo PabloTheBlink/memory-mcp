@@ -31,6 +31,31 @@ import {
   detectContext,
 } from "./context";
 
+const EMBEDDING_MODEL_ID = "Xenova/all-MiniLM-L6-v2";
+
+async function runReindexingIfNeeded() {
+  const storedModel = getMeta("embedding_model");
+  if (storedModel === EMBEDDING_MODEL_ID) return;
+
+  process.stderr.write(`Re-indexing memory: switching from ${storedModel || "unknown"} to ${EMBEDDING_MODEL_ID}...\n`);
+
+  const nodes = getAllNodes();
+  let count = 0;
+  for (const node of nodes) {
+    try {
+      const emb = await getEmbedding(node.label);
+      updateNodeEmbedding(node.id, emb);
+      count++;
+      if (count % 20 === 0) process.stderr.write(`Progress: ${count}/${nodes.length}\n`);
+    } catch (e) {
+      process.stderr.write(`Failed to index node "${node.label}": ${e}\n`);
+    }
+  }
+
+  setMeta("embedding_model", EMBEDDING_MODEL_ID);
+  process.stderr.write(`Re-indexing complete. ${count} nodes updated.\n`);
+}
+
 const server = new Server(
   { name: "memory-mcp", version: "1.1.0" },
   { capabilities: { tools: {} } }
@@ -407,9 +432,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 });
 
 async function main() {
+  // Run migration if needed BEFORE starting the server
+  await runReindexingIfNeeded();
+
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  process.stderr.write("memory-mcp v1.1 running\n");
+  process.stderr.write("memory-mcp v1.1 running (local embeddings)\n");
 }
 
 main().catch((err) => {

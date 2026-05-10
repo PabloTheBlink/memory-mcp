@@ -1,19 +1,15 @@
-const OLLAMA_URL = "http://localhost:11434/api/embeddings";
-const MODEL = "nomic-embed-text";
+import { pipeline } from '@xenova/transformers';
+
+let extractor: any = null;
 
 export async function getEmbedding(text: string): Promise<number[]> {
-  const res = await fetch(OLLAMA_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ model: MODEL, prompt: text }),
-  });
-
-  if (!res.ok) {
-    throw new Error(`Ollama embedding failed: ${res.status} ${await res.text()}`);
+  if (!extractor) {
+    // Initializing the model (Xenova/all-MiniLM-L6-v2 is lightweight and effective)
+    extractor = await pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2');
   }
 
-  const data = (await res.json()) as { embedding: number[] };
-  return data.embedding;
+  const output = await extractor(text, { pooling: 'mean', normalize: true });
+  return Array.from(output.data);
 }
 
 export function cosineSimilarity(a: number[], b: number[]): number {
