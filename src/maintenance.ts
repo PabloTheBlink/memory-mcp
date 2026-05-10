@@ -14,8 +14,9 @@ import { cosineSimilarity } from "./embeddings";
 import { consolidate } from "./decay";
 
 const SEMANTIC_LINK_THRESHOLD  = 0.78;  // create edge if no edge exists
-const AUTO_MERGE_EMB_THRESHOLD = 0.97;  // merge if embedding sim this high...
-const AUTO_MERGE_TEXT_THRESHOLD = 0.65; // ...AND text sim this high
+const SYNONYM_LINK_THRESHOLD   = 0.95;  // very strong link for synonyms/translations
+const AUTO_MERGE_EMB_THRESHOLD = 0.98;  // merge if embedding sim this high...
+const AUTO_MERGE_TEXT_THRESHOLD = 0.70; // ...AND text sim this high
 const ORPHAN_MIN_AGE_DAYS       = 3;    // don't prune nodes touched recently
 const ORPHAN_MAX_STRENGTH       = 0.15; // only prune if strength this low
 const MIN_INTERVAL_HOURS        = 1;    // skip if run less than this ago
@@ -116,7 +117,10 @@ export function runMaintenance(force = false): MaintenanceReport {
       const bIsCtx = b.label.startsWith("[ctx:");
       if (aIsCtx !== bIsCtx) continue; // skip ctx↔non-ctx auto-links (episodic handles that)
 
-      const weight = (sim - SEMANTIC_LINK_THRESHOLD) / (1 - SEMANTIC_LINK_THRESHOLD) * 0.4;
+      const weight = sim >= SYNONYM_LINK_THRESHOLD
+        ? 0.8 // Synonyms/translations get very strong links
+        : (sim - SEMANTIC_LINK_THRESHOLD) / (1 - SEMANTIC_LINK_THRESHOLD) * 0.4;
+
       upsertEdge(a.id, b.id, "semantic", weight);
       report.semanticLinksAdded++;
       report.newLinks.push({ a: a.label, b: b.label, similarity: sim });

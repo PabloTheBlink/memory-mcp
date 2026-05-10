@@ -31,7 +31,11 @@ export async function spreadActivation(
       const edgeKey = [edge.from_id, edge.to_id].sort().join(":");
       edgeSet.set(edgeKey, { from_id: edge.from_id, to_id: edge.to_id, weight: edge.weight, type: edge.type });
 
-      const spread = activation * decayFactor * edge.weight;
+      // Human-like spread: Important nodes attract and sustain activation better.
+      const targetImportance = node.importance ?? 0.5;
+      const effectiveDecay = decayFactor * (0.9 + targetImportance * 0.2); 
+      const spread = activation * effectiveDecay * edge.weight;
+      
       if (spread < threshold) continue;
 
       const current = activations.get(node.id) ?? 0;

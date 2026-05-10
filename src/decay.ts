@@ -40,14 +40,26 @@ export function consolidate(): ConsolidationStats {
 
   for (const node of nodes) {
     const elapsedDays = (now - node.last_accessed_at) / (1000 * 60 * 60 * 24);
-    const retention = Math.exp(-elapsedDays / Math.max(node.strength, 0.01));
+    
+    // Human-like decay: Importance and Strength create stability.
+    // Important memories (importance ~ 1.0) decay much slower.
+    const stability = node.strength * (1.0 + node.importance * 5.0);
+    const retention = Math.exp(-elapsedDays / Math.max(stability, 0.01));
     const newStrength = node.strength * retention;
 
-    if (newStrength < NODE_DELETION_THRESHOLD) {
+    // "Flashbulb" memories: highly important memories are protected from deletion
+    // unless they are extremely weak.
+    const effectiveDeletionThreshold = node.importance > 0.8 
+      ? NODE_DELETION_THRESHOLD * 0.2 
+      : NODE_DELETION_THRESHOLD;
+
+    if (newStrength < effectiveDeletionThreshold) {
       deleteNode(node.id);
       stats.nodesDeleted++;
     } else if (node.access_count >= HIGH_ACCESS_THRESHOLD) {
-      const boosted = Math.min(1.0, newStrength + STRENGTH_BOOST);
+      // Strengthening based on access count and importance
+      const reinforcement = STRENGTH_BOOST * (1.0 + node.importance);
+      const boosted = Math.min(1.0, newStrength + reinforcement);
       updateNodeStrength(node.id, boosted);
       stats.nodesStrengthened++;
     } else {

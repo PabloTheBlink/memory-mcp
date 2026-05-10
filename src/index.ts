@@ -44,6 +44,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         type: "object",
         properties: {
           concept: { type: "string", description: "The concept to activate" },
+          importance: { type: "number", description: "How significant this concept is (0-1)", default: 0.5 },
         },
         required: ["concept"],
       },
@@ -126,14 +127,19 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   try {
     switch (name) {
       case "memory_activate": {
-        const concept = (args as any).concept as string;
+        const { concept, importance = 0.5 } = args as any;
         const activeContext = getActiveContext();
 
-        let node = findOrCreateNode(concept);
+        let node = findOrCreateNode(concept, null, importance);
         if (!node.embedding) {
           const emb = await getEmbedding(concept);
           updateNodeEmbedding(node.id, emb);
           node = { ...node, embedding: emb };
+        }
+        
+        // Update importance if it changed significantly
+        if (importance !== 0.5 && Math.abs(node.importance - importance) > 0.1) {
+          updateNodeImportance(node.id, importance);
         }
 
         // Find semantically similar nodes and wire them
@@ -283,12 +289,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             label: n.label,
             // Relevance blends semantic similarity, spreading activation, and node strength
             relevance_score:
-              (similarityMap.get(n.id) ?? 0) * 0.5 +
-              n.activation * 0.35 +
-              n.strength * 0.15,
+              (similarityMap.get(n.id) ?? 0) * 0.45 + // Semantic match
+              n.activation * 0.30 +                 // Contextual activation
+              n.strength * 0.15 +                   // Persistence
+              n.importance * 0.10,                  // Significance
             semantic_similarity: similarityMap.get(n.id) ?? 0,
             activation: n.activation,
             strength: n.strength,
+            importance: n.importance,
           }))
           .sort((a, b) => b.relevance_score - a.relevance_score)
           .slice(0, top_k);
@@ -307,6 +315,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             adjacency.get(e.from_id)!.push({ label: fromLabel, weight: e.weight });
           if (toLabel && !isContextNode(toLabel))
             adjacency.get(e.to_id)!.push({ label: toLabel, weight: e.weight });
+        }
+
+        // Reinforce associations with the active context for the top results (episodic learning)
+        const contextNodeIdForReinforcement = await ensureContextNode(activeContext);
+        for (const n of ranked.slice(0, 3)) {
+          upsertEdge(n.id, contextNodeIdForReinforcement, "episodic", 0.05);
         }
 
         const rankedWithNeighbors = ranked.map((n) => ({

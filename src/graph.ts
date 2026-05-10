@@ -10,6 +10,7 @@ export interface MemoryNode {
   label: string;
   embedding: number[] | null;
   strength: number;
+  importance: number; // 0-1, how significant this memory is
   access_count: number;
   created_at: number;
   last_accessed_at: number;
@@ -49,6 +50,7 @@ function initSchema(db: Database.Database): void {
       label TEXT NOT NULL UNIQUE,
       embedding TEXT,
       strength REAL NOT NULL DEFAULT 0.5,
+      importance REAL NOT NULL DEFAULT 0.5,
       access_count INTEGER NOT NULL DEFAULT 0,
       created_at INTEGER NOT NULL,
       last_accessed_at INTEGER NOT NULL
@@ -79,7 +81,7 @@ function initSchema(db: Database.Database): void {
   `);
 }
 
-export function findOrCreateNode(label: string, embedding: number[] | null = null): MemoryNode {
+export function findOrCreateNode(label: string, embedding: number[] | null = null, importance: number = 0.5): MemoryNode {
   const db = getDb();
   const now = Date.now();
 
@@ -90,11 +92,11 @@ export function findOrCreateNode(label: string, embedding: number[] | null = nul
 
   const id = uuidv4();
   db.prepare(`
-    INSERT INTO nodes (id, label, embedding, strength, access_count, created_at, last_accessed_at)
-    VALUES (?, ?, ?, 0.5, 0, ?, ?)
-  `).run(id, label, embedding ? JSON.stringify(embedding) : null, now, now);
+    INSERT INTO nodes (id, label, embedding, strength, importance, access_count, created_at, last_accessed_at)
+    VALUES (?, ?, ?, 0.5, ?, 0, ?, ?)
+  `).run(id, label, embedding ? JSON.stringify(embedding) : null, importance, now, now);
 
-  return { id, label, embedding, strength: 0.5, access_count: 0, created_at: now, last_accessed_at: now };
+  return { id, label, embedding, strength: 0.5, importance, access_count: 0, created_at: now, last_accessed_at: now };
 }
 
 export function getNodeById(id: string): MemoryNode | null {
@@ -190,6 +192,10 @@ export function updateNodeStrength(id: string, strength: number): void {
   getDb().prepare("UPDATE nodes SET strength = ? WHERE id = ?").run(Math.max(0, Math.min(1, strength)), id);
 }
 
+export function updateNodeImportance(id: string, importance: number): void {
+  getDb().prepare("UPDATE nodes SET importance = ? WHERE id = ?").run(Math.max(0, Math.min(1, importance)), id);
+}
+
 export function updateEdgeWeight(fromId: string, toId: string, weight: number): void {
   const [a, b] = fromId < toId ? [fromId, toId] : [toId, fromId];
   getDb().prepare("UPDATE edges SET weight = ? WHERE from_id = ? AND to_id = ?").run(Math.max(0, Math.min(1, weight)), a, b);
@@ -226,6 +232,7 @@ function deserializeNode(row: any): MemoryNode {
     label: row.label,
     embedding: row.embedding ? JSON.parse(row.embedding) : null,
     strength: row.strength,
+    importance: row.importance ?? 0.5,
     access_count: row.access_count,
     created_at: row.created_at,
     last_accessed_at: row.last_accessed_at,
