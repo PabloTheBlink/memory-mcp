@@ -15,6 +15,7 @@ import {
   updateNodeImportance,
   upsertEdge,
   touchNode,
+  fireNode,
   setMeta,
   getMeta,
   getNeighbors,
@@ -200,6 +201,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         bindToContext(node.id, contextNodeId);
 
         touchNode(node.id);
+        fireNode(node.id);
 
         // Spread activation (Higher depth for initialization)
         const result = await spreadActivation(
@@ -321,7 +323,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           };
         }
 
-        for (const { id } of seeds) touchNode(id);
+        for (const { id } of seeds) {
+          touchNode(id);
+          fireNode(id);
+        }
         const result = await spreadActivation(seeds, 3, 0.48, 0.05, contextNodeId);
 
         const similarityMap = new Map(refinedSimilar.map((s) => [s.id, s.similarity]));

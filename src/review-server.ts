@@ -134,7 +134,12 @@ function esc(s: string): string {
 }
 
 function json(res: http.ServerResponse, data: object, status = 200) {
-  res.writeHead(status, { "Content-Type": "application/json" });
+  res.writeHead(status, { 
+    "Content-Type": "application/json",
+    "Cache-Control": "no-cache, no-store, must-revalidate",
+    "Pragma": "no-cache",
+    "Expires": "0"
+  });
   res.end(JSON.stringify(data));
 }
 
@@ -171,13 +176,16 @@ function buildGraphData() {
     metadata: n.metadata,
   }));
 
-  const links = allEdges.map(e => ({
-    source: e.from_id,
-    target: e.to_id,
-    weight: e.weight,
-    type: e.type,
-    co_occurrences: e.co_occurrences,
-  }));
+  const nodeIds = new Set(nodes.map(n => n.id));
+  const links = allEdges
+    .filter(e => nodeIds.has(e.from_id) && nodeIds.has(e.to_id))
+    .map(e => ({
+      source: e.from_id,
+      target: e.to_id,
+      weight: e.weight,
+      type: e.type,
+      co_occurrences: e.co_occurrences,
+    }));
 
   return { nodes, links, ctxNames };
 }
@@ -388,6 +396,7 @@ fetch('/api/graph').then(r => r.json()).then(({ nodes, links, ctxNames }) => {
   const node = container.append('g').selectAll('g')
     .data(nodes).join('g')
     .attr('class','node')
+    .attr('id', d => \`node-\${d.id}\`)
     .call(d3.drag()
       .on('start', (e,d) => { if(!e.active) sim.alphaTarget(0.3).restart(); d.fx=d.x; d.fy=d.y; })
       .on('drag',  (e,d) => { d.fx=e.x; d.fy=e.y; })
@@ -486,10 +495,48 @@ fetch('/api/graph').then(r => r.json()).then(({ nodes, links, ctxNames }) => {
     node.attr('transform', d => \`translate(\${d.x},\${d.y})\`);
   });
 
-  // Animate pulse on context nodes and active nodes
-  function pulse() {
-    const now = Date.now();
-    
+  // Real-time polling for updates
+  setInterval(() => {
+    fetch('/api/graph').then(r => r.json()).then(data => {
+      data.nodes.forEach(nn => {
+        const existing = nodeById.get(nn.id);
+        if (existing && nn.last_fired_at > existing.last_fired_at) {
+          console.log('Spike:', nn.label);
+          existing.last_fired_at = nn.last_fired_at;
+          existing.strength = nn.strength;
+          existing.importance = nn.importance;
+               // Trigger Neuronal Spike (Refined)
+          const el = node.filter(d => d.id === nn.id).select('circle');
+          const baseR = nodeRadius(existing);
+          const color = nodeColor(existing);
+          const baseIntensity = (nn.strength * 0.8) + 0.2;
+          
+          // Staggered firing: small delay based on ID
+          const idShift = (parseInt(nn.id.slice(0, 8), 16) % 1000) / 1000;
+          
+          setTimeout(() => {
+            el.interrupt()
+              .attr('r', baseR * (1.2 + baseIntensity * 0.8))
+              .attr('stroke', '#ffffff')
+              .attr('stroke-width', 2 + baseIntensity * 12)
+              .attr('filter', 'url(#glow-white)')
+              .transition().duration(4000).ease(d3.easeQuadOut)
+              .attr('r', baseR)
+              .attr('stroke', color)
+              .attr('stroke-width', existing.isContext || existing.isHub ? 2 : 1.5)
+              .attr('filter', existing.isHub ? 'url(#glow-hub)' : (existing.isContext ? 'url(#glow-purple)' : 'url(#glow-blue)'));
+          }, idShift * 600);
+          
+          existing.last_fired_at = nn.last_fired_at;
+          existing.strength = nn.strength;
+          existing.importance = nn.importance;
+        }
+      });
+    });
+  }, 1000);
+
+  // Animate pulse on context nodes
+  function pulseContexts() {
     container.selectAll('circle[stroke-dasharray]')
       .transition().duration(2000).ease(d3.easeSinInOut)
       .attr('r', function() { 
@@ -503,17 +550,9 @@ fetch('/api/graph').then(r => r.json()).then(({ nodes, links, ctxNames }) => {
         return parseFloat(d.isContext ? nodeRadius(d) + 6 : 0); 
       })
       .attr('opacity', 0.3)
-      .on('end', pulse);
-
-    // Active "fired" nodes pulse
-    node.filter(d => (now - d.last_fired_at) < 30000) // Pulse if fired in last 30s
-      .select('circle')
-      .transition().duration(800)
-      .attr('stroke-width', 4)
-      .transition().duration(800)
-      .attr('stroke-width', d => d.isContext || d.isHub ? 2 : 1.5);
+      .on('end', pulseContexts);
   }
-  pulse();
+  pulseContexts();
 });
 </script>
 </body>
