@@ -35,46 +35,49 @@ export async function spreadActivation(
     // Habituation: hubs (many neighbors) dissipate energy faster
     const degreePenalty = Math.max(0.7, 1.0 - (neighbors.length * 0.02));
 
+    // Lateral Inhibition: highly active nodes suppress competitors
+    const currentActivation = activations.get(id) ?? 0;
+    const inhibitionRadius = currentActivation > 0.8 ? 0.05 : 0;
+
     for (const { node, edge } of neighbors) {
       const edgeKey = [edge.from_id, edge.to_id].sort().join(":");
       edgeSet.set(edgeKey, { from_id: edge.from_id, to_id: edge.to_id, weight: edge.weight, type: edge.type });
 
-      // Human-like spread: 
-      // 1. Edge Type Bias: Episodic/Temporal links are strong contextual bridges.
+      // Human-like spread logic
       const typeBias = 
-        edge.type === "episodic" ? 1.2 : 
-        edge.type === "temporal" ? 1.1 : 
+        edge.type === "episodic" ? 1.25 : 
+        edge.type === "temporal" ? 1.15 : 
+        edge.type === "abstraction" ? 1.1 :
         edge.type === "causal"   ? 1.05 : 1.0;
 
-      // 2. Importance Resonance: Important nodes attract and sustain energy.
       const targetImportance = node.importance ?? 0.5;
-      const resonance = 0.9 + (targetImportance * 0.3); 
+      const resonance = 0.9 + (targetImportance * 0.4); 
       
-      // 3. Firing Fatigue: Nodes that are repeatedly triggered in one cycle 
-      // lose receptivity (simulating neuronal refractory periods).
       const nodeFatigue = fatigue.get(node.id) ?? 0;
-      // Persistent fatigue: if fired in the last 5 minutes, add a baseline penalty.
       const now = Date.now();
-      const persistentFatigue = (now - node.last_fired_at) < 5 * 60 * 1000 ? 0.25 : 0;
-      const receptivity = Math.max(0.05, 1.0 - (nodeFatigue + persistentFatigue));
+      const persistentFatigue = (now - node.last_fired_at) < 5 * 60 * 1000 ? 0.3 : 0;
+      const receptivity = Math.max(0.02, 1.0 - (nodeFatigue + persistentFatigue));
 
+      // Apply lateral inhibition if the current node is dominant
+      const inhibition = inhibitionRadius * (1.0 - edge.weight);
+      
       const effectiveDecay = decayFactor * resonance * typeBias * degreePenalty * receptivity; 
-      const spread = activation * effectiveDecay * edge.weight;
+      const spread = (activation - inhibition) * effectiveDecay * edge.weight;
       
       if (spread < threshold) continue;
 
       const current = activations.get(node.id) ?? 0;
-      // Activation accumulates slightly (like neurons summing input)
-      const nextActivation = Math.min(1.2, current + (spread * 0.8));
+      const nextActivation = Math.min(1.3, current + (spread * 0.85));
 
-      if (nextActivation > current + 0.05) {
+      if (nextActivation > current + 0.03) {
         activations.set(node.id, nextActivation);
-        fatigue.set(node.id, nodeFatigue + 0.2); // Increase session fatigue
-        fireNode(node.id); // Mark as fired persistently
+        fatigue.set(node.id, nodeFatigue + 0.25); 
+        fireNode(node.id); 
         queue.push({ id: node.id, activation: nextActivation, depth: depth + 1 });
       }
     }
   }
+
 
   const nodes: ActivatedNode[] = [];
   for (const [nodeId, activation] of activations) {

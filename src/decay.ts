@@ -38,17 +38,43 @@ export function consolidate(): ConsolidationStats {
   const nodes = getAllNodes();
   stats.nodesProcessed = nodes.length;
 
+  // ── Step 1.5: Interference (Inhibition) ─────────────────────────────
+  // Human memory suffers from interference: similar memories compete.
+  const similarPairs: Array<{ node: any; penalty: number }> = [];
+  for (let i = 0; i < nodes.length; i++) {
+    for (let j = i + 1; j < nodes.length; j++) {
+      const a = nodes[i], b = nodes[j];
+      if (!a.embedding || !b.embedding) continue;
+      
+      const { cosineSimilarity } = require("./embeddings");
+      const sim = cosineSimilarity(a.embedding, b.embedding);
+      if (sim > 0.85) {
+        const aRecent = a.last_accessed_at;
+        const bRecent = b.last_accessed_at;
+        if (Math.abs(aRecent - bRecent) > 1000 * 60 * 60) {
+          const [older, newer] = aRecent < bRecent ? [a, b] : [b, a];
+          const penalty = 0.05 * (sim - 0.8) * 5; 
+          similarPairs.push({ node: older, penalty });
+        }
+      }
+    }
+  }
+
   for (const node of nodes) {
     const elapsedDays = (now - node.last_accessed_at) / (1000 * 60 * 60 * 24);
     
     // Human-like decay: Importance and Strength create stability.
-    // Important memories (importance ~ 1.0) decay much slower.
     const stability = node.strength * (1.0 + node.importance * 5.0);
     const retention = Math.exp(-elapsedDays / Math.max(stability, 0.01));
-    const newStrength = node.strength * retention;
+    
+    let newStrength = node.strength * retention;
 
-    // "Flashbulb" memories: highly important memories are protected from deletion
-    // unless they are extremely weak.
+    // Apply interference penalty if applicable
+    const interference = similarPairs.find(p => p.node.id === node.id);
+    if (interference) {
+      newStrength = Math.max(0, newStrength - interference.penalty);
+    }
+
     const effectiveDeletionThreshold = node.importance > 0.8 
       ? NODE_DELETION_THRESHOLD * 0.2 
       : NODE_DELETION_THRESHOLD;
@@ -56,12 +82,8 @@ export function consolidate(): ConsolidationStats {
     if (newStrength < effectiveDeletionThreshold) {
       deleteNode(node.id);
       stats.nodesDeleted++;
-    } else if (elapsedDays < 1.0 && node.access_count > 0) {
-      // Spacing Effect Reinforcement:
-      // Recalling a memory after some time (but before forgetting) makes it much stronger.
-      // If recalled too quickly (elapsedDays ~ 0), the boost is minimal.
-      // If recalled after a "gap" (e.g. 0.5 - 2 days), the boost is maximized.
-      const spacingGap = Math.min(2.0, elapsedDays * 24); // Gap in hours, capped
+    } else if (elapsedDays < 1.0 && node.access_count > 0 && !interference) {
+      const spacingGap = Math.min(2.0, elapsedDays * 24); 
       const reinforcement = STRENGTH_BOOST * (1.0 + node.importance) * (1.0 + Math.log1p(spacingGap));
       
       const boosted = Math.min(1.0, newStrength + reinforcement);
@@ -90,6 +112,7 @@ export function consolidate(): ConsolidationStats {
       stats.edgesDecayed++;
     }
   }
+
 
   setMeta("last_consolidation", String(now));
   return stats;

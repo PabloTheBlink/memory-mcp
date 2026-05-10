@@ -41,10 +41,10 @@ async function main() {
 
     if (similar.length < MIN_RESULTS) process.exit(0);
 
-    // Human-like refinement: Identify "hidden" associations
+    // Human-like refinement: Identify "hidden" associations (Language Agnostic)
     // If a node has high semantic similarity but low lexical overlap, it might be 
-    // a translation or a deep conceptual link. We value these highly.
-    const STOP_WORDS = new Set(["the", "and", "for", "with", "that", "this", "los", "las", "con", "para", "que", "una", "uno", "del", "por"]);
+    // a translation or a deep conceptual link.
+    const STOP_WORDS = new Set(["the", "and", "for", "with", "that", "this", "los", "las", "con", "para", "que", "una", "uno", "del", "por", "des", "les", "une", "est"]);
     const promptLower = prompt.toLowerCase();
     const promptTokens = promptLower.split(/[\s,.;:!?]+/).filter(t => t.length > 2 && !STOP_WORDS.has(t));
 
@@ -58,18 +58,21 @@ async function main() {
       const hasLexicalOverlap = labelTokens.some(t => promptTokens.includes(t)) || 
                                (labelLower.length > 3 && promptLower.includes(labelLower));
       
-      // If high similarity (>0.6) but NO lexical overlap, it's a likely translation or conceptual link.
-      // We give it a "Cognitive Insight" boost.
-      const insightBoost = (!hasLexicalOverlap && s.similarity > 0.6) ? 0.15 : 0;
+      // If high similarity (>0.65) but NO lexical overlap, it's a "Cognitive Insight" (likely translation)
+      const insightBoost = (!hasLexicalOverlap && s.similarity > 0.65) ? 0.20 : 0;
       
-      // Small boost for exact substring matches (still useful for names/technical terms)
-      const lexicalBoost = hasLexicalOverlap ? 0.1 : 0;
+      // Small boost for exact matches
+      const lexicalBoost = hasLexicalOverlap ? 0.08 : 0;
 
-      return { ...s, similarity: Math.min(1.0, s.similarity + insightBoost + lexicalBoost) };
+      // Importance factor: human memory prioritizes important concepts in search
+      const importanceBoost = (node.importance || 0.5) * 0.1;
+
+      return { ...s, similarity: Math.min(1.0, s.similarity + insightBoost + lexicalBoost + importanceBoost) };
     }).sort((a, b) => b.similarity - a.similarity);
 
-    const seedIds = refinedSimilar.slice(0, 5).map(s => ({ id: s.id, activation: 1.0 }));
-    const result = await spreadActivation(seedIds, 2, 0.45, 0.08);
+    const seedIds = refinedSimilar.slice(0, 6).map(s => ({ id: s.id, activation: 1.0 }));
+    const result = await spreadActivation(seedIds, 3, 0.48, 0.06);
+
 
     const simMap = new Map(refinedSimilar.map(s => [s.id, s.similarity]));
     const baseSimMap = new Map(similar.map(s => [s.id, s.similarity]));

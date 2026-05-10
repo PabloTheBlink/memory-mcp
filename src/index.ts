@@ -134,21 +134,21 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         
         // Update importance if it changed significantly
         if (importance !== 0.5 && Math.abs(node.importance - importance) > 0.1) {
-          updateNodeImportance(node.id, importance);
+          updateNodeImportance(node.id, (node.importance + importance) / 2);
         }
 
         // Find semantically similar nodes and wire them
         const allNodes = getAllNodes();
-        const similar = findSimilar(node.embedding!, allNodes, 0.75, 20).filter((s) => s.id !== node.id);
-        for (const s of similar.slice(0, 5)) {
-          upsertEdge(node.id, s.id, "semantic", s.similarity * 0.15);
+        const similar = findSimilar(node.embedding!, allNodes, 0.78, 20).filter((s) => s.id !== node.id);
+        for (const s of similar.slice(0, 4)) {
+          upsertEdge(node.id, s.id, "semantic", s.similarity * 0.12);
         }
 
         // Human-like: Temporal Co-occurrence (Episodic memory)
         // Link to recently activated nodes in this context
         const lastActivatedId = getMeta(`last_act_${activeContext}`);
         if (lastActivatedId && lastActivatedId !== node.id) {
-          upsertEdge(node.id, lastActivatedId, "temporal", 0.2);
+          upsertEdge(node.id, lastActivatedId, "temporal", 0.25);
         }
         setMeta(`last_act_${activeContext}`, node.id);
 
@@ -158,15 +158,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         touchNode(node.id);
 
-        // Spread activation
+        // Spread activation (Higher depth for initialization)
         const result = await spreadActivation(
           [
             { id: node.id, activation: 1.0 },
-            { id: contextNodeId, activation: 0.35 },
+            { id: contextNodeId, activation: 0.4 },
           ],
           3,
           0.5,
-          0.08
+          0.06
         );
 
         return {
@@ -241,10 +241,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const allNodes = getAllNodes();
         
         // 0.32 threshold for cross-language recall
-        const similar = findSimilar(queryEmbedding, allNodes, 0.32, top_k * 3);
+        const similar = findSimilar(queryEmbedding, allNodes, 0.30, top_k * 4);
 
-        // Human-like refinement for language-agnosticism (Insight boost)
-        const STOP_WORDS = new Set(["the", "and", "for", "with", "that", "this", "los", "las", "con", "para", "que", "una", "uno", "del", "por"]);
+        // Human-like refinement: Identify "hidden" associations (Language Agnostic)
+        const STOP_WORDS = new Set(["the", "and", "for", "with", "that", "this", "los", "las", "con", "para", "que", "una", "uno", "del", "por", "des", "les", "une", "est"]);
         const queryLower = query.toLowerCase();
         const queryTokens = queryLower.split(/[\s,.;:!?]+/).filter(t => t.length > 2 && !STOP_WORDS.has(t));
 
@@ -258,14 +258,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                                    (labelLower.length > 3 && queryLower.includes(labelLower));
           
           // Boost if semantically strong but lexically different (likely translation/deep concept)
-          const insightBoost = (!hasLexicalOverlap && s.similarity > 0.6) ? 0.15 : 0;
-          return { ...s, similarity: Math.min(1.0, s.similarity + insightBoost) };
+          const insightBoost = (!hasLexicalOverlap && s.similarity > 0.65) ? 0.20 : 0;
+          // Importance also helps recall
+          const importanceBoost = (node.importance || 0.5) * 0.1;
+
+          return { ...s, similarity: Math.min(1.0, s.similarity + insightBoost + importanceBoost) };
         }).sort((a, b) => b.similarity - a.similarity);
 
         const contextNodeId = await ensureContextNode(activeContext);
         const seeds: Array<{ id: string; activation: number }> = [
-          { id: contextNodeId, activation: 0.45 }, // Stronger context priming
-          ...refinedSimilar.slice(0, 5).map((s) => ({ id: s.id, activation: 1.0 })),
+          { id: contextNodeId, activation: 0.5 }, // Strong context priming
+          ...refinedSimilar.slice(0, 6).map((s) => ({ id: s.id, activation: 1.0 })),
         ];
 
         if (seeds.length === 1) {
@@ -275,7 +278,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
 
         for (const { id } of seeds) touchNode(id);
-        const result = await spreadActivation(seeds, 3, 0.5, 0.06);
+        const result = await spreadActivation(seeds, 3, 0.48, 0.05);
 
         const similarityMap = new Map(refinedSimilar.map((s) => [s.id, s.similarity]));
 
@@ -286,9 +289,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             label: n.label,
             relevance_score:
               (similarityMap.get(n.id) ?? 0) * 0.45 + 
-              n.activation * 0.30 +                 
-              n.strength * 0.15 +                   
-              n.importance * 0.10,                  
+              n.activation * 0.35 +                 
+              n.strength * 0.12 +                   
+              n.importance * 0.08,                  
             connected_to: [] as string[]
           }))
           .sort((a, b) => b.relevance_score - a.relevance_score)
@@ -309,10 +312,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             adjacency.get(e.to_id)!.push({ label: toLabel, weight: e.weight });
         }
 
-        // Reinforce associations
+        // Reinforce associations (Long Term Potentiation)
         const contextNodeIdForReinforcement = await ensureContextNode(activeContext);
         for (const n of ranked.slice(0, 3)) {
-          upsertEdge(n.id, contextNodeIdForReinforcement, "episodic", 0.08);
+          upsertEdge(n.id, contextNodeIdForReinforcement, "episodic", 0.1);
           n.connected_to = (adjacency.get(n.id) ?? [])
             .sort((a, b) => b.weight - a.weight)
             .slice(0, 5)
