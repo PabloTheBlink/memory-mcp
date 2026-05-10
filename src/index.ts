@@ -12,6 +12,7 @@ import {
   getTopNodes,
   getStats,
   updateNodeEmbedding,
+  updateNodeImportance,
   upsertEdge,
   touchNode,
   setMeta,
@@ -38,20 +39,19 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
     {
       name: "memory_activate",
-      description:
-        "Activate a concept in memory. Finds or creates the node, runs spreading activation seeded from both the concept and the active context, returns the activated subgraph. Concepts learned in a context become easier to recall within that context.",
+      description: "Activate a concept and its context. Returns the activated subgraph. Use this when learning something new.",
       inputSchema: {
         type: "object",
         properties: {
           concept: { type: "string", description: "The concept to activate" },
-          importance: { type: "number", description: "How significant this concept is (0-1)", default: 0.5 },
+          importance: { type: "number", description: "0-1 significance", default: 0.5 },
         },
         required: ["concept"],
       },
     },
     {
       name: "memory_associate",
-      description: "Create or reinforce an association between two concepts.",
+      description: "Link two concepts. Types: causal, temporal, semantic, episodic.",
       inputSchema: {
         type: "object",
         properties: {
@@ -69,8 +69,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: "memory_recall",
-      description:
-        "Recall memories relevant to a query. Uses semantic similarity + spreading activation biased toward the active context. Memories from any context can surface if strongly associated.",
+      description: "Search memories by semantic similarity and spreading activation.",
       inputSchema: {
         type: "object",
         properties: {
@@ -82,37 +81,33 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: "memory_consolidate",
-      description:
-        "Apply Ebbinghaus decay to all nodes and edges. Prune weak memories, strengthen frequently accessed ones.",
+      description: "Prune weak memories and apply Ebbinghaus decay.",
       inputSchema: { type: "object", properties: {} },
     },
     {
       name: "memory_status",
-      description: "Return memory system statistics including active context.",
+      description: "Show system stats and active context.",
       inputSchema: { type: "object", properties: {} },
     },
     {
       name: "memory_maintenance",
-      description:
-        "Full maintenance pass: Ebbinghaus decay, semantic linking (connect nodes that are similar but unconnected), auto-merge near-duplicates, orphan pruning. Safe to call anytime — skips if run less than 1 hour ago unless force=true.",
+      description: "Run full maintenance (decay, link, merge, prune). Rate-limited to 1/hour.",
       inputSchema: {
         type: "object",
         properties: {
-          force: { type: "boolean", default: false, description: "Run even if maintenance ran recently" },
+          force: { type: "boolean", default: false },
         },
       },
     },
     {
       name: "memory_set_context",
-      description:
-        "Set the active memory context. Context is a node hub — activating it biases recall toward memories formed in that context, just like how physical environment cues memory in humans. Use 'user' for personal info, 'project:<name>' for project-specific knowledge.",
+      description: "Change active context (e.g. 'user', 'project:name'). Bias recall toward this context.",
       inputSchema: {
         type: "object",
         properties: {
           context: {
             type: "string",
-            description:
-              "Context name. Examples: 'user', 'project:devetty-platform', 'project:my-app'. Leave empty to auto-detect from git.",
+            description: "Context label. Leave empty to auto-detect.",
           },
         },
         required: [],
@@ -170,34 +165,23 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           content: [
             {
               type: "text",
-              text: JSON.stringify(
-                {
-                  activated_concept: concept,
-                  active_context: activeContext,
-                  node_id: node.id,
-                  similar_concepts: similar.slice(0, 5).map((s) => {
-                    const n = allNodes.find((nn) => nn.id === s.id);
-                    return { label: n?.label ?? s.id, similarity: s.similarity };
-                  }),
-                  activated_subgraph: {
+              text: JSON.stringify({
+                  concept,
+                  context: activeContext,
+                  subgraph: {
                     nodes: result.nodes
                       .filter((n) => !isContextNode(n.label))
-                      .map((n) => ({
-                        id: n.id,
-                        label: n.label,
-                        activation: n.activation,
-                        strength: n.strength,
-                        access_count: n.access_count,
-                      })),
-                    context_nodes: result.nodes
+                      .map((n) => ({ label: n.label, strength: Math.round(n.strength * 100) / 100 })),
+                    context: result.nodes
                       .filter((n) => isContextNode(n.label))
-                      .map((n) => ({ label: n.label, activation: n.activation })),
-                    edges: result.edges,
+                      .map((n) => n.label),
+                    edges: result.edges.map(e => {
+                      const from = result.nodes.find(n => n.id === e.from_id)?.label;
+                      const to = result.nodes.find(n => n.id === e.to_id)?.label;
+                      return `${from} --(${e.type})--> ${to}`;
+                    }),
                   },
-                },
-                null,
-                2
-              ),
+                }),
             },
           ],
         };
@@ -234,20 +218,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           content: [
             {
               type: "text",
-              text: JSON.stringify(
-                {
-                  edge: {
-                    from: concept_a,
-                    to: concept_b,
-                    weight: edge.weight,
-                    type: edge.type,
-                    co_occurrences: edge.co_occurrences,
-                  },
+              text: JSON.stringify({
+                  associated: `${concept_a} <-> ${concept_b}`,
+                  type,
                   context: activeContext,
-                },
-                null,
-                2
-              ),
+                }),
             },
           ],
         };
@@ -335,15 +310,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           content: [
             {
               type: "text",
-              text: JSON.stringify(
-                {
+              text: JSON.stringify({
                   query,
                   context: activeContext,
-                  results: rankedWithNeighbors,
-                },
-                null,
-                2
-              ),
+                  results: rankedWithNeighbors.map(r => ({
+                    label: r.label,
+                    relevance: Math.round(r.relevance_score * 100) / 100,
+                    connected: r.connected_to
+                  })),
+                }),
             },
           ],
         };
@@ -352,7 +327,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case "memory_consolidate": {
         const stats = consolidate();
         return {
-          content: [{ type: "text", text: JSON.stringify({ consolidation: stats }, null, 2) }],
+          content: [{ type: "text", text: JSON.stringify({ consolidation: stats }) }],
         };
       }
 
@@ -360,7 +335,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const force = (args as any)?.force === true;
         const report = runMaintenance(force);
         return {
-          content: [{ type: "text", text: JSON.stringify(report, null, 2) }],
+          content: [{ type: "text", text: JSON.stringify(report) }],
         };
       }
 
@@ -373,24 +348,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           content: [
             {
               type: "text",
-              text: JSON.stringify(
-                {
-                  active_context: activeContext,
-                  total_nodes: stats.nodeCount,
-                  total_edges: stats.edgeCount,
-                  last_consolidation: stats.lastConsolidation
-                    ? new Date(stats.lastConsolidation).toISOString()
-                    : null,
-                  top_10_strongest: topNodes.map((n) => ({
-                    label: n.label,
-                    strength: n.strength,
-                    access_count: n.access_count,
-                    last_accessed: new Date(n.last_accessed_at).toISOString(),
-                  })),
-                },
-                null,
-                2
-              ),
+              text: JSON.stringify({
+                  context: activeContext,
+                  stats: { nodes: stats.nodeCount, edges: stats.edgeCount },
+                  top_memories: topNodes.map((n) => n.label),
+                }),
             },
           ],
         };
@@ -410,7 +372,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           content: [
             {
               type: "text",
-              text: JSON.stringify({ active_context: context, context_node_id: contextNodeId }, null, 2),
+              text: JSON.stringify({ context }),
             },
           ],
         };

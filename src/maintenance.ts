@@ -123,7 +123,9 @@ export function runMaintenance(force = false): MaintenanceReport {
 
       upsertEdge(a.id, b.id, "semantic", weight);
       report.semanticLinksAdded++;
-      report.newLinks.push({ a: a.label, b: b.label, similarity: sim });
+      if (report.newLinks.length < 10) {
+        report.newLinks.push({ a: a.label, b: b.label, similarity: Math.round(sim * 100) / 100 });
+      }
     }
   }
 
@@ -161,7 +163,9 @@ export function runMaintenance(force = false): MaintenanceReport {
       deleteNode(del.id);
 
       report.autoMerged++;
-      report.merges.push({ kept: keep.label, deleted: del.label, similarity: embSim, reason } as any);
+      if (report.merges.length < 10) {
+        report.merges.push({ kept: keep.label, deleted: del.label, similarity: Math.round(embSim * 100) / 100 } as any);
+      }
 
       nodesForMerge.splice(j, 1);
       j--;
