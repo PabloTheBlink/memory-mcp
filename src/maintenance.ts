@@ -186,19 +186,41 @@ export function runMaintenance(force = false): MaintenanceReport {
     report.orphansPruned++;
   }
 
-  // ── Step 5: Conceptual Chunking (Abstraction) ─────────────────────────
-  // Find "islands" of nodes that are highly interconnected and create a Hub.
-  const nodesAfterPrune = getAllNodes().filter(n => !n.label.startsWith("[") && !n.label.startsWith("concept:"));
-  const edgesAfterPrune = getAllEdges();
-  
+  // ── Build Adjacency Map ────────────────────────────────────────────────
+  const allEdgesForAnalysis = getAllEdges();
   const adjacency = new Map<string, string[]>();
-  for (const e of edgesAfterPrune) {
+  for (const e of allEdgesForAnalysis) {
     if (!adjacency.has(e.from_id)) adjacency.set(e.from_id, []);
     if (!adjacency.has(e.to_id))   adjacency.set(e.to_id,   []);
     adjacency.get(e.from_id)!.push(e.to_id);
     adjacency.get(e.to_id)!.push(e.from_id);
   }
 
+  // ── Step 4.5: Centrality-based Importance Boost ────────────────────────
+  // Nodes that become central (hubs) should have their "Importance" boosted.
+  const nodeIdsAfterPrune = afterMerge.filter(n => !connectedIds.has(n.id) ? false : true).map(n => n.id);
+  const { updateNodeImportance } = require("./graph");
+
+  for (const nodeId of nodeIdsAfterPrune) {
+    const neighbors = adjacency.get(nodeId) ?? [];
+    if (neighbors.length >= 5) {
+      const node = afterMerge.find(n => n.id === nodeId);
+      if (node) {
+        // Boost importance based on degree: 5 neighbors = +0.05, 10 neighbors = +0.10, etc.
+        const centralityBoost = Math.min(0.3, neighbors.length * 0.01);
+        const newImportance = Math.min(1.0, (node.importance || 0.5) + centralityBoost);
+        if (newImportance > (node.importance || 0.5) + 0.01) {
+          updateNodeImportance(node.id, newImportance);
+        }
+      }
+    }
+  }
+
+  // ── Step 5: Conceptual Chunking (Abstraction) ─────────────────────────
+  // Find "islands" of nodes that are highly interconnected and create a Hub.
+  const nodesAfterPrune = getAllNodes().filter(n => !n.label.startsWith("[") && !n.label.startsWith("concept:"));
+  const edgesAfterPrune = getAllEdges();
+  
   const visited = new Set<string>();
   for (const node of nodesAfterPrune) {
     if (visited.has(node.id)) continue;
