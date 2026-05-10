@@ -8,6 +8,7 @@ import {
 import {
   findOrCreateNode,
   getAllNodes,
+  getAllEdges,
   getTopNodes,
   getStats,
   updateNodeEmbedding,
@@ -18,6 +19,7 @@ import {
 import { getEmbedding, findSimilar } from "./embeddings";
 import { spreadActivation } from "./activation";
 import { consolidate } from "./decay";
+import { runMaintenance } from "./maintenance";
 import {
   getActiveContext,
   ensureContextNode,
@@ -87,6 +89,17 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       name: "memory_status",
       description: "Return memory system statistics including active context.",
       inputSchema: { type: "object", properties: {} },
+    },
+    {
+      name: "memory_maintenance",
+      description:
+        "Full maintenance pass: Ebbinghaus decay, semantic linking (connect nodes that are similar but unconnected), auto-merge near-duplicates, orphan pruning. Safe to call anytime — skips if run less than 1 hour ago unless force=true.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          force: { type: "boolean", default: false, description: "Run even if maintenance ran recently" },
+        },
+      },
     },
     {
       name: "memory_set_context",
@@ -240,7 +253,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         const queryEmbedding = await getEmbedding(query);
         const allNodes = getAllNodes();
-        const similar = findSimilar(queryEmbedding, allNodes, 0.5, top_k * 2);
+        // 0.35 threshold handles cross-language queries (e.g. Spanish query → English nodes)
+        const similar = findSimilar(queryEmbedding, allNodes, 0.35, top_k * 2);
 
         // Context hub gets medium activation — it primes context-relevant memories
         // without blocking cross-context ones (like remembering work things at home)
@@ -279,6 +293,30 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           .sort((a, b) => b.relevance_score - a.relevance_score)
           .slice(0, top_k);
 
+        // Include 1-hop neighbors for each result so small models can
+        // read "name → Pablo" without needing a second tool call.
+        const nodeMap = new Map(allNodes.map((n) => [n.id, n.label]));
+        const allEdgesForRecall = getAllEdges();
+        const adjacency = new Map<string, Array<{ label: string; weight: number }>>();
+        for (const e of allEdgesForRecall) {
+          if (!adjacency.has(e.from_id)) adjacency.set(e.from_id, []);
+          if (!adjacency.has(e.to_id))   adjacency.set(e.to_id,   []);
+          const fromLabel = nodeMap.get(e.to_id);
+          const toLabel   = nodeMap.get(e.from_id);
+          if (fromLabel && !isContextNode(fromLabel))
+            adjacency.get(e.from_id)!.push({ label: fromLabel, weight: e.weight });
+          if (toLabel && !isContextNode(toLabel))
+            adjacency.get(e.to_id)!.push({ label: toLabel, weight: e.weight });
+        }
+
+        const rankedWithNeighbors = ranked.map((n) => ({
+          ...n,
+          connected_to: (adjacency.get(n.id) ?? [])
+            .sort((a, b) => b.weight - a.weight)
+            .slice(0, 5)
+            .map((nb) => nb.label),
+        }));
+
         return {
           content: [
             {
@@ -287,12 +325,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 {
                   query,
                   context: activeContext,
-                  results: ranked,
-                  edges: result.edges.filter(
-                    (e) =>
-                      ranked.some((n) => n.id === e.from_id) ||
-                      ranked.some((n) => n.id === e.to_id)
-                  ),
+                  results: rankedWithNeighbors,
                 },
                 null,
                 2
@@ -306,6 +339,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const stats = consolidate();
         return {
           content: [{ type: "text", text: JSON.stringify({ consolidation: stats }, null, 2) }],
+        };
+      }
+
+      case "memory_maintenance": {
+        const force = (args as any)?.force === true;
+        const report = runMaintenance(force);
+        return {
+          content: [{ type: "text", text: JSON.stringify(report, null, 2) }],
         };
       }
 

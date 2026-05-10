@@ -6,7 +6,10 @@
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
-    "dev": "tsx src/index.ts"
+    "dev": "tsx src/index.ts",
+    "review": "tsx src/review-server.ts",
+    "maintenance": "node dist/maintenance.js",
+    "maintenance:force": "node dist/maintenance.js --force"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0",
