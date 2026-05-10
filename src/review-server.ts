@@ -202,7 +202,7 @@ function renderPage(): string {
       const to = getNodeById(e.to_id)!;
       return `<tr>
         <td>${esc(from.label)}</td>
-        <td><span class="tag">${e.type}</span></td>
+        <td><span class="tag ${e.type}">${e.type}</span></td>
         <td>${esc(to.label)}</td>
         <td>${e.weight.toFixed(3)}</td>
         <td>${e.co_occurrences}</td>
@@ -236,6 +236,8 @@ function renderPage(): string {
   input.label-edit { background: #111; color: #fff; border: 1px solid #444; padding: 3px 8px; border-radius: 4px; font-size: 0.85rem; width: 100%; }
   .hidden { display: none; }
   .tag { background: #1e3a2a; color: #4caf82; font-size: 0.75rem; padding: 1px 6px; border-radius: 4px; }
+  .tag.abstraction { background: #3a1e3a; color: #d8b4fe; }
+  .tag.causal { background: #3a2a1e; color: #fb923c; }
   #toast { position: fixed; bottom: 24px; right: 24px; background: #1a3a1a; color: #4caf82; border: 1px solid #2a5a2a; padding: 10px 16px; border-radius: 8px; font-size: 0.85rem; display: none; }
   .stats { display: flex; gap: 16px; margin-bottom: 24px; }
   .stat { background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 8px; padding: 12px 20px; }
@@ -387,9 +389,11 @@ function buildGraphData() {
     id: n.id,
     label: n.label,
     isContext: n.label.startsWith("[ctx:"),
+    isHub: n.label.startsWith("concept:"),
     contextName: n.label.startsWith("[ctx:") ? n.label.slice(5, -1) : null,
     contexts: ctxMap.get(n.id) ?? [],
     strength: n.strength,
+    importance: n.importance,
     access_count: n.access_count,
     last_accessed_at: n.last_accessed_at,
   }));
@@ -496,18 +500,21 @@ function renderBrain(): string {
 <div id="info-panel">
   <div class="label" id="info-label"></div>
   <div class="row"><span class="key">Strength</span><span class="val" id="info-strength"></span></div>
+  <div class="row"><span class="key">Importance</span><span class="val" id="info-importance"></span></div>
   <div class="row"><span class="key">Accesses</span><span class="val" id="info-access"></span></div>
   <div class="row"><span class="key">Last seen</span><span class="val" id="info-last"></span></div>
-  <div style="margin-top:8px; color:#555; font-size:0.72rem">Contexts</div>
+  <div style="margin-top:8px; color:#555; font-size:0.72rem">Contexts / Types</div>
   <div id="info-contexts" style="margin-top:4px"></div>
 </div>
 
 <div id="legend">
   <div class="row"><div class="swatch" style="background:#8b5cf6"></div><span>Context hub</span></div>
+  <div class="row"><div class="swatch" style="background:#fbbf24"></div><span>Conceptual Hub</span></div>
   <div class="row"><div class="swatch" style="background:#38bdf8"></div><span>user context</span></div>
   <div id="legend-projects"></div>
   <div class="row"><div class="swatch" style="background:#94a3b8"></div><span>no context</span></div>
   <div style="margin-top:8px; border-top:1px solid #1e2a3a; padding-top:8px">
+    <div class="row"><div class="line-swatch" style="background:#fbbf24"></div><span>abstraction</span></div>
     <div class="row"><div class="line-swatch" style="background:#f97316"></div><span>causal</span></div>
     <div class="row"><div class="line-swatch" style="background:#38bdf8"></div><span>semantic</span></div>
     <div class="row"><div class="line-swatch" style="background:#4ade80"></div><span>temporal</span></div>
@@ -532,6 +539,9 @@ const defs = svg.append('defs');
   merge.append('feMergeNode').attr('in','blur');
   merge.append('feMergeNode').attr('in','SourceGraphic');
 });
+defs.append('filter').attr('id', 'glow-hub').attr('x','-50%').attr('y','-50%').attr('width','200%').attr('height','200%')
+  .append('feGaussianBlur').attr('stdDeviation','6').attr('result','blur');
+d3.select('#glow-hub').append('feMerge').selectAll('feMergeNode').data(['blur','SourceGraphic']).join('feMergeNode').attr('in',d=>d);
 
 // Project colors palette
 const PROJECT_COLORS = ['#34d399','#fb923c','#f472b6','#facc15','#a78bfa','#22d3ee'];
@@ -552,6 +562,7 @@ fetch('/api/graph').then(r => r.json()).then(({ nodes, links, ctxNames }) => {
 
   function nodeColor(n) {
     if (n.isContext) return '#8b5cf6';
+    if (n.isHub) return '#fbbf24';
     if (n.contexts.length > 0) {
       const c = n.contexts.find(c => c !== 'user') ?? n.contexts[0];
       return ctxColor[c] ?? '#94a3b8';
@@ -561,11 +572,12 @@ fetch('/api/graph').then(r => r.json()).then(({ nodes, links, ctxNames }) => {
 
   function nodeRadius(n) {
     if (n.isContext) return 14 + n.access_count * 0.4;
+    if (n.isHub) return 16 + n.importance * 10;
     return 5 + n.strength * 14 + Math.min(n.access_count, 20) * 0.3;
   }
 
   function linkColor(type) {
-    return { causal:'#f97316', semantic:'#38bdf8', temporal:'#4ade80', episodic:'#c084fc' }[type] ?? '#888';
+    return { abstraction:'#fbbf24', causal:'#f97316', semantic:'#38bdf8', temporal:'#4ade80', episodic:'#c084fc' }[type] ?? '#888';
   }
 
   // Build id sets for fast lookup
@@ -577,11 +589,12 @@ fetch('/api/graph').then(r => r.json()).then(({ nodes, links, ctxNames }) => {
       const s = nodeById.get(d.source.id ?? d.source);
       const t = nodeById.get(d.target.id ?? d.target);
       if (s?.isContext || t?.isContext) return 80;
+      if (s?.isHub || t?.isHub) return 60;
       return 120 / (d.weight + 0.1);
     }).strength(d => d.weight * 0.4))
-    .force('charge', d3.forceManyBody().strength(d => d.isContext ? -400 : -120))
+    .force('charge', d3.forceManyBody().strength(d => (d.isContext || d.isHub) ? -500 : -120))
     .force('center', d3.forceCenter(W/2, H/2))
-    .force('collide', d3.forceCollide().radius(d => nodeRadius(d) + 8));
+    .force('collide', d3.forceCollide().radius(d => nodeRadius(d) + 10));
 
   const container = svg.append('g');
 
@@ -607,10 +620,10 @@ fetch('/api/graph').then(r => r.json()).then(({ nodes, links, ctxNames }) => {
 
   node.append('circle')
     .attr('r', d => nodeRadius(d))
-    .attr('fill', d => nodeColor(d) + (d.isContext ? '22' : '18'))
+    .attr('fill', d => nodeColor(d) + (d.isContext || d.isHub ? '22' : '18'))
     .attr('stroke', d => nodeColor(d))
-    .attr('stroke-width', d => d.isContext ? 2 : 1.5)
-    .attr('filter', d => d.isContext ? 'url(#glow-purple)' : 'url(#glow-blue)');
+    .attr('stroke-width', d => d.isContext || d.isHub ? 2 : 1.5)
+    .attr('filter', d => d.isHub ? 'url(#glow-hub)' : (d.isContext ? 'url(#glow-purple)' : 'url(#glow-blue)'));
 
   // Pulse ring for context nodes
   node.filter(d => d.isContext).append('circle')
@@ -646,14 +659,16 @@ fetch('/api/graph').then(r => r.json()).then(({ nodes, links, ctxNames }) => {
     // Info panel
     const panel = document.getElementById('info-panel');
     panel.style.display = 'block';
-    document.getElementById('info-label').textContent = d.isContext ? d.contextName : d.label;
+    document.getElementById('info-label').textContent = d.isContext ? d.contextName : (d.isHub ? d.label.replace('concept:','') : d.label);
     document.getElementById('info-strength').textContent = d.strength.toFixed(3);
+    document.getElementById('info-importance').textContent = (d.importance || 0.5).toFixed(3);
     document.getElementById('info-access').textContent = d.access_count;
     document.getElementById('info-last').textContent = new Date(d.last_accessed_at).toLocaleDateString();
     document.getElementById('info-contexts').innerHTML =
       d.isContext
-        ? \`<span class="ctx-tag">context hub</span>\`
-        : (d.contexts.length ? d.contexts.map(c => \`<span class="ctx-tag">\${c}</span>\`).join('') : '<span style="color:#444">none</span>');
+        ? '<span class="ctx-tag">context hub</span>'
+        : (d.isHub ? '<span class="ctx-tag" style="background:#3a2a0a;color:#fbbf24">conceptual hub</span>' : '') + 
+          (d.contexts.length ? d.contexts.map(c => '<span class="ctx-tag">' + c + '</span>').join('') : (!d.isHub ? '<span style="color:#444">none</span>' : ''));
   }
 
   function clearHighlight() {

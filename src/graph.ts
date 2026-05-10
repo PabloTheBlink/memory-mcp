@@ -14,6 +14,7 @@ export interface MemoryNode {
   access_count: number;
   created_at: number;
   last_accessed_at: number;
+  last_fired_at: number;
 }
 
 export interface MemoryEdge {
@@ -53,7 +54,8 @@ function initSchema(db: Database.Database): void {
       importance REAL NOT NULL DEFAULT 0.5,
       access_count INTEGER NOT NULL DEFAULT 0,
       created_at INTEGER NOT NULL,
-      last_accessed_at INTEGER NOT NULL
+      last_accessed_at INTEGER NOT NULL,
+      last_fired_at INTEGER NOT NULL DEFAULT 0
     );
 
     CREATE TABLE IF NOT EXISTS edges (
@@ -92,11 +94,11 @@ export function findOrCreateNode(label: string, embedding: number[] | null = nul
 
   const id = uuidv4();
   db.prepare(`
-    INSERT INTO nodes (id, label, embedding, strength, importance, access_count, created_at, last_accessed_at)
-    VALUES (?, ?, ?, 0.5, ?, 0, ?, ?)
+    INSERT INTO nodes (id, label, embedding, strength, importance, access_count, created_at, last_accessed_at, last_fired_at)
+    VALUES (?, ?, ?, 0.5, ?, 0, ?, ?, 0)
   `).run(id, label, embedding ? JSON.stringify(embedding) : null, importance, now, now);
 
-  return { id, label, embedding, strength: 0.5, importance, access_count: 0, created_at: now, last_accessed_at: now };
+  return { id, label, embedding, strength: 0.5, importance, access_count: 0, created_at: now, last_accessed_at: now, last_fired_at: 0 };
 }
 
 export function getNodeById(id: string): MemoryNode | null {
@@ -118,6 +120,13 @@ export function touchNode(id: string): void {
   const now = Date.now();
   getDb().prepare(`
     UPDATE nodes SET last_accessed_at = ?, access_count = access_count + 1 WHERE id = ?
+  `).run(now, id);
+}
+
+export function fireNode(id: string): void {
+  const now = Date.now();
+  getDb().prepare(`
+    UPDATE nodes SET last_fired_at = ? WHERE id = ?
   `).run(now, id);
 }
 
@@ -236,6 +245,7 @@ function deserializeNode(row: any): MemoryNode {
     access_count: row.access_count,
     created_at: row.created_at,
     last_accessed_at: row.last_accessed_at,
+    last_fired_at: row.last_fired_at ?? 0,
   };
 }
 

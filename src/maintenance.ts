@@ -217,56 +217,41 @@ export function runMaintenance(force = false): MaintenanceReport {
   }
 
   // ── Step 5: Conceptual Chunking (Abstraction) ─────────────────────────
-  // Find "islands" of nodes that are highly interconnected and create a Hub.
+  // Local Clustering detection: for each node, check if neighbors form a dense clique.
   const nodesAfterPrune = getAllNodes().filter(n => !n.label.startsWith("[") && !n.label.startsWith("concept:"));
-  const edgesAfterPrune = getAllEdges();
-  
-  const visited = new Set<string>();
+  const nodeMapForChunk = new Map(nodesAfterPrune.map(n => [n.id, n]));
+  const processedForChunk = new Set<string>();
+
   for (const node of nodesAfterPrune) {
-    if (visited.has(node.id)) continue;
+    if (processedForChunk.has(node.id)) continue;
     
-    // Simple BFS to find component
-    const component: typeof nodesAfterPrune = [];
-    const queue = [node.id];
-    visited.add(node.id);
-    
-    while (queue.length > 0) {
-      const id = queue.shift()!;
-      const n = nodesAfterPrune.find(curr => curr.id === id);
-      if (n) {
-        component.push(n);
+    const neighbors = (adjacency.get(node.id) ?? [])
+      .map(id => nodeMapForChunk.get(id))
+      .filter((n): n is NonNullable<typeof n> => !!n);
+
+    if (neighbors.length >= 3 && neighbors.length <= 6) {
+      const cluster = [node, ...neighbors];
+      const clusterIds = new Set(cluster.map(c => c.id));
+      
+      let internalEdges = 0;
+      for (const id of clusterIds) {
         for (const neighborId of (adjacency.get(id) ?? [])) {
-          if (!visited.has(neighborId)) {
-            visited.add(neighborId);
-            queue.push(neighborId);
-          }
+          if (clusterIds.has(neighborId)) internalEdges++;
         }
       }
-    }
+      internalEdges /= 2; // bidirectional
 
-    // If we have a medium-sized dense cluster, create a Hub
-    if (component.length >= 3 && component.length <= 6) {
-      // Density check: actual edges / possible edges
-      const possibleEdges = (component.length * (component.length - 1)) / 2;
-      let actualEdges = 0;
-      const componentIds = new Set(component.map(c => c.id));
-      for (const e of edgesAfterPrune) {
-        if (componentIds.has(e.from_id) && componentIds.has(e.to_id)) actualEdges++;
-      }
-
-      if (actualEdges / possibleEdges >= 0.6) {
-        // Create an abstraction node. 
-        // Label is derived from top 2 most important nodes
-        const sorted = component.sort((a, b) => (b.importance || 0) - (a.importance || 0));
+      const possibleEdges = (cluster.length * (cluster.length - 1)) / 2;
+      if (internalEdges / possibleEdges >= 0.75) {
+        const sorted = cluster.sort((a, b) => (b.importance || 0) - (a.importance || 0));
         const hubLabel = `concept:${sorted[0].label} & ${sorted[1].label}`;
         
-        // Use graph tools directly or via a wrapper if exists. 
-        // maintenance.ts has access to graph.ts exports.
         const { findOrCreateNode: createNode } = require("./graph");
         const hub = createNode(hubLabel, null, 0.7); 
         
-        for (const member of component) {
-          upsertEdge(hub.id, member.id, "abstraction", 0.5);
+        for (const member of cluster) {
+          upsertEdge(hub.id, member.id, "abstraction", 0.6);
+          processedForChunk.add(member.id);
         }
         
         report.conceptualHubsCreated++;

@@ -130,7 +130,15 @@ async function main() {
       // Medium-weight are contextual relationships
       const related = neighbors.filter(nb => nb.weight >= 0.2 && nb.weight < 0.45).map(nb => nb.label);
 
+      // Check for conceptual hubs (abstraction edges)
+      const hubEdges = allEdges.filter(e => (e.from_id === n.id || e.to_id === n.id) && e.type === "abstraction");
+      const hubs = hubEdges.map(e => {
+        const hubId = e.from_id === n.id ? e.to_id : e.from_id;
+        return nodeMap.get(hubId);
+      }).filter(h => h && h.startsWith("concept:")).map(h => h!.replace("concept:", ""));
+
       let card = `▸ ${n.label}`;
+      if (hubs.length    > 0) card += `\n  part of concept: ${hubs.join(", ")}`;
       if (types.length   > 0) card += `\n  is/of: ${types.join(", ")}`;
       if (related.length > 0) card += `\n  related: ${related.join(", ")}`;
       return card;

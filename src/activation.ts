@@ -1,4 +1,4 @@
-import { getNeighbors, getNodeById, touchNode, ActivatedNode } from "./graph";
+import { getNeighbors, getNodeById, touchNode, fireNode, ActivatedNode } from "./graph";
 
 export interface ActivationResult {
   nodes: ActivatedNode[];
@@ -53,7 +53,10 @@ export async function spreadActivation(
       // 3. Firing Fatigue: Nodes that are repeatedly triggered in one cycle 
       // lose receptivity (simulating neuronal refractory periods).
       const nodeFatigue = fatigue.get(node.id) ?? 0;
-      const receptivity = Math.max(0.1, 1.0 - nodeFatigue);
+      // Persistent fatigue: if fired in the last 5 minutes, add a baseline penalty.
+      const now = Date.now();
+      const persistentFatigue = (now - node.last_fired_at) < 5 * 60 * 1000 ? 0.25 : 0;
+      const receptivity = Math.max(0.05, 1.0 - (nodeFatigue + persistentFatigue));
 
       const effectiveDecay = decayFactor * resonance * typeBias * degreePenalty * receptivity; 
       const spread = activation * effectiveDecay * edge.weight;
@@ -66,7 +69,8 @@ export async function spreadActivation(
 
       if (nextActivation > current + 0.05) {
         activations.set(node.id, nextActivation);
-        fatigue.set(node.id, nodeFatigue + 0.2); // Increase fatigue
+        fatigue.set(node.id, nodeFatigue + 0.2); // Increase session fatigue
+        fireNode(node.id); // Mark as fired persistently
         queue.push({ id: node.id, activation: nextActivation, depth: depth + 1 });
       }
     }
