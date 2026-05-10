@@ -20,7 +20,7 @@ export interface MemoryEdge {
   from_id: string;
   to_id: string;
   weight: number;
-  type: "causal" | "temporal" | "semantic" | "episodic";
+  type: "causal" | "temporal" | "semantic" | "episodic" | "abstraction";
   co_occurrences: number;
   created_at: number;
   last_reinforced_at: number;

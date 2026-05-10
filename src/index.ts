@@ -59,7 +59,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           concept_b: { type: "string" },
           type: {
             type: "string",
-            enum: ["causal", "temporal", "semantic", "episodic"],
+            enum: ["causal", "temporal", "semantic", "episodic", "abstraction"],
             default: "semantic",
           },
           strength: { type: "number", minimum: 0, maximum: 1 },
@@ -244,16 +244,21 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const similar = findSimilar(queryEmbedding, allNodes, 0.32, top_k * 3);
 
         // Human-like refinement for language-agnosticism (Insight boost)
+        const STOP_WORDS = new Set(["the", "and", "for", "with", "that", "this", "los", "las", "con", "para", "que", "una", "uno", "del", "por"]);
         const queryLower = query.toLowerCase();
+        const queryTokens = queryLower.split(/[\s,.;:!?]+/).filter(t => t.length > 2 && !STOP_WORDS.has(t));
+
         const refinedSimilar = similar.map(s => {
           const node = allNodes.find(n => n.id === s.id);
           if (!node) return s;
           const labelLower = node.label.toLowerCase();
-          const words = labelLower.split(/\s+/);
-          const hasLexicalOverlap = words.some(w => w.length > 2 && queryLower.includes(w));
+          const labelTokens = labelLower.split(/[\s,.;:!?]+/).filter(t => t.length > 2 && !STOP_WORDS.has(t));
+          
+          const hasLexicalOverlap = labelTokens.some(t => queryTokens.includes(t)) || 
+                                   (labelLower.length > 3 && queryLower.includes(labelLower));
           
           // Boost if semantically strong but lexically different (likely translation/deep concept)
-          const insightBoost = (!hasLexicalOverlap && s.similarity > 0.6) ? 0.12 : 0;
+          const insightBoost = (!hasLexicalOverlap && s.similarity > 0.6) ? 0.15 : 0;
           return { ...s, similarity: Math.min(1.0, s.similarity + insightBoost) };
         }).sort((a, b) => b.similarity - a.similarity);
 

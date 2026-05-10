@@ -69,6 +69,8 @@ export interface MaintenanceReport {
   autoMerged: number;
   merges: Array<{ kept: string; deleted: string; similarity: number }>;
   orphansPruned: number;
+  conceptualHubsCreated: number;
+  hubs: string[];
   ranAt: string;
   durationMs: number;
 }
@@ -82,6 +84,8 @@ export function runMaintenance(force = false): MaintenanceReport {
     autoMerged: 0,
     merges: [],
     orphansPruned: 0,
+    conceptualHubsCreated: 0,
+    hubs: [],
     ranAt: new Date().toISOString(),
     durationMs: 0,
   };
@@ -153,11 +157,6 @@ export function runMaintenance(force = false): MaintenanceReport {
 
       if (!exactMatch && !textMatch && !embMatch) continue;
 
-      const reason = exactMatch ? "case-insensitive match"
-        : textMatch ? `text similarity ${(textSim * 100).toFixed(0)}%`
-        : `embedding ${(embSim * 100).toFixed(0)}% + text ${(textSim * 100).toFixed(0)}%`;
-
-      // Keep the one with more accesses (better consolidated in memory)
       const [keep, del] = a.access_count >= b.access_count ? [a, b] : [b, a];
       rewireEdges(del.id, keep.id);
       deleteNode(del.id);
@@ -175,8 +174,8 @@ export function runMaintenance(force = false): MaintenanceReport {
   // ── Step 4: Orphan pruning ──────────────────────────────────────────────
   const now = Date.now();
   const afterMerge = getAllNodes();
-  const edgesAfter = getAllEdges();
-  const connectedIds = new Set(edgesAfter.flatMap(e => [e.from_id, e.to_id]));
+  const allEdges = getAllEdges();
+  const connectedIds = new Set(allEdges.flatMap(e => [e.from_id, e.to_id]));
 
   for (const n of afterMerge) {
     if (connectedIds.has(n.id)) continue;
@@ -185,6 +184,73 @@ export function runMaintenance(force = false): MaintenanceReport {
     if (ageDays < ORPHAN_MIN_AGE_DAYS) continue;
     deleteNode(n.id);
     report.orphansPruned++;
+  }
+
+  // ── Step 5: Conceptual Chunking (Abstraction) ─────────────────────────
+  // Find "islands" of nodes that are highly interconnected and create a Hub.
+  const nodesAfterPrune = getAllNodes().filter(n => !n.label.startsWith("[") && !n.label.startsWith("concept:"));
+  const edgesAfterPrune = getAllEdges();
+  
+  const adjacency = new Map<string, string[]>();
+  for (const e of edgesAfterPrune) {
+    if (!adjacency.has(e.from_id)) adjacency.set(e.from_id, []);
+    if (!adjacency.has(e.to_id))   adjacency.set(e.to_id,   []);
+    adjacency.get(e.from_id)!.push(e.to_id);
+    adjacency.get(e.to_id)!.push(e.from_id);
+  }
+
+  const visited = new Set<string>();
+  for (const node of nodesAfterPrune) {
+    if (visited.has(node.id)) continue;
+    
+    // Simple BFS to find component
+    const component: typeof nodesAfterPrune = [];
+    const queue = [node.id];
+    visited.add(node.id);
+    
+    while (queue.length > 0) {
+      const id = queue.shift()!;
+      const n = nodesAfterPrune.find(curr => curr.id === id);
+      if (n) {
+        component.push(n);
+        for (const neighborId of (adjacency.get(id) ?? [])) {
+          if (!visited.has(neighborId)) {
+            visited.add(neighborId);
+            queue.push(neighborId);
+          }
+        }
+      }
+    }
+
+    // If we have a medium-sized dense cluster, create a Hub
+    if (component.length >= 3 && component.length <= 6) {
+      // Density check: actual edges / possible edges
+      const possibleEdges = (component.length * (component.length - 1)) / 2;
+      let actualEdges = 0;
+      const componentIds = new Set(component.map(c => c.id));
+      for (const e of edgesAfterPrune) {
+        if (componentIds.has(e.from_id) && componentIds.has(e.to_id)) actualEdges++;
+      }
+
+      if (actualEdges / possibleEdges >= 0.6) {
+        // Create an abstraction node. 
+        // Label is derived from top 2 most important nodes
+        const sorted = component.sort((a, b) => (b.importance || 0) - (a.importance || 0));
+        const hubLabel = `concept:${sorted[0].label} & ${sorted[1].label}`;
+        
+        // Use graph tools directly or via a wrapper if exists. 
+        // maintenance.ts has access to graph.ts exports.
+        const { findOrCreateNode: createNode } = require("./graph");
+        const hub = createNode(hubLabel, null, 0.7); 
+        
+        for (const member of component) {
+          upsertEdge(hub.id, member.id, "abstraction", 0.5);
+        }
+        
+        report.conceptualHubsCreated++;
+        report.hubs.push(hubLabel);
+      }
+    }
   }
 
   setMeta("last_maintenance", String(now));
@@ -208,4 +274,5 @@ if (require.main === module) {
   process.stdout.write(`  Linked: ${report.semanticLinksAdded} new semantic edges\n`);
   process.stdout.write(`  Merged: ${report.autoMerged} near-duplicate nodes\n`);
   process.stdout.write(`  Pruned: ${report.orphansPruned} orphan nodes\n`);
+  process.stdout.write(`  Chunked: ${report.conceptualHubsCreated} conceptual hubs created\n`);
 }
