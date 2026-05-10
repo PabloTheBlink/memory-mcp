@@ -44,13 +44,19 @@ async function main() {
     // Human-like refinement: Identify "hidden" associations
     // If a node has high semantic similarity but low lexical overlap, it might be 
     // a translation or a deep conceptual link. We value these highly.
+    const STOP_WORDS = new Set(["the", "and", "for", "with", "that", "this", "los", "las", "con", "para", "que", "una", "uno", "del", "por"]);
     const promptLower = prompt.toLowerCase();
+    const promptTokens = promptLower.split(/[\s,.;:!?]+/).filter(t => t.length > 2 && !STOP_WORDS.has(t));
+
     const refinedSimilar = similar.map(s => {
       const node = allNodes.find(n => n.id === s.id);
       if (!node) return s;
 
       const labelLower = node.label.toLowerCase();
-      const hasLexicalOverlap = labelLower.split(/\s+/).some(w => w.length > 2 && promptLower.includes(w));
+      const labelTokens = labelLower.split(/[\s,.;:!?]+/).filter(t => t.length > 2 && !STOP_WORDS.has(t));
+      
+      const hasLexicalOverlap = labelTokens.some(t => promptTokens.includes(t)) || 
+                               (labelLower.length > 3 && promptLower.includes(labelLower));
       
       // If high similarity (>0.6) but NO lexical overlap, it's a likely translation or conceptual link.
       // We give it a "Cognitive Insight" boost.

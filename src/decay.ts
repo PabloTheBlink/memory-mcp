@@ -56,9 +56,14 @@ export function consolidate(): ConsolidationStats {
     if (newStrength < effectiveDeletionThreshold) {
       deleteNode(node.id);
       stats.nodesDeleted++;
-    } else if (node.access_count >= HIGH_ACCESS_THRESHOLD) {
-      // Strengthening based on access count and importance
-      const reinforcement = STRENGTH_BOOST * (1.0 + node.importance);
+    } else if (elapsedDays < 1.0 && node.access_count > 0) {
+      // Spacing Effect Reinforcement:
+      // Recalling a memory after some time (but before forgetting) makes it much stronger.
+      // If recalled too quickly (elapsedDays ~ 0), the boost is minimal.
+      // If recalled after a "gap" (e.g. 0.5 - 2 days), the boost is maximized.
+      const spacingGap = Math.min(2.0, elapsedDays * 24); // Gap in hours, capped
+      const reinforcement = STRENGTH_BOOST * (1.0 + node.importance) * (1.0 + Math.log1p(spacingGap));
+      
       const boosted = Math.min(1.0, newStrength + reinforcement);
       updateNodeStrength(node.id, boosted);
       stats.nodesStrengthened++;

@@ -23,11 +23,19 @@ export async function spreadActivation(
     ({ id, activation }) => ({ id, activation, depth: 0 })
   );
 
+  // Fatigue/Habituation: nodes that "fire" too much or have too many connections
+  // become temporarily less receptive to prevent Hub saturation.
+  const fatigue = new Map<string, number>();
+
   while (queue.length > 0) {
     const { id, activation, depth } = queue.shift()!;
     if (depth >= maxDepth) continue;
 
-    for (const { node, edge } of getNeighbors(id)) {
+    const neighbors = getNeighbors(id);
+    // Habituation: hubs (many neighbors) dissipate energy faster
+    const degreePenalty = Math.max(0.7, 1.0 - (neighbors.length * 0.02));
+
+    for (const { node, edge } of neighbors) {
       const edgeKey = [edge.from_id, edge.to_id].sort().join(":");
       edgeSet.set(edgeKey, { from_id: edge.from_id, to_id: edge.to_id, weight: edge.weight, type: edge.type });
 
@@ -42,7 +50,12 @@ export async function spreadActivation(
       const targetImportance = node.importance ?? 0.5;
       const resonance = 0.9 + (targetImportance * 0.3); 
       
-      const effectiveDecay = decayFactor * resonance * typeBias; 
+      // 3. Firing Fatigue: Nodes that are repeatedly triggered in one cycle 
+      // lose receptivity (simulating neuronal refractory periods).
+      const nodeFatigue = fatigue.get(node.id) ?? 0;
+      const receptivity = Math.max(0.1, 1.0 - nodeFatigue);
+
+      const effectiveDecay = decayFactor * resonance * typeBias * degreePenalty * receptivity; 
       const spread = activation * effectiveDecay * edge.weight;
       
       if (spread < threshold) continue;
@@ -53,6 +66,7 @@ export async function spreadActivation(
 
       if (nextActivation > current + 0.05) {
         activations.set(node.id, nextActivation);
+        fatigue.set(node.id, nodeFatigue + 0.2); // Increase fatigue
         queue.push({ id: node.id, activation: nextActivation, depth: depth + 1 });
       }
     }
