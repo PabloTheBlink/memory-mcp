@@ -15,19 +15,8 @@ const TOP_K = 5;
 const SIM_THRESHOLD = 0.30;
 const MIN_RESULTS = 1;
 
-async function main() {
-  let raw = "";
-  for await (const chunk of process.stdin) raw += chunk;
-
-  let prompt = "";
-  try {
-    const input = JSON.parse(raw);
-    prompt = input.message ?? input.prompt ?? "";
-  } catch {
-    process.exit(0);
-  }
-
-  if (!prompt || prompt.length < 3) process.exit(0);
+export async function queryMemory(prompt: string): Promise<string | null> {
+  if (!prompt || prompt.length < 3) return null;
 
   try {
     const embedding = await getEmbedding(prompt);
@@ -39,11 +28,9 @@ async function main() {
 
     const similar = findSimilar(embedding, allNodes, SIM_THRESHOLD, TOP_K * 4);
 
-    if (similar.length < MIN_RESULTS) process.exit(0);
+    if (similar.length < MIN_RESULTS) return null;
 
     // Human-like refinement: Identify "hidden" associations (Language Agnostic)
-    // If a node has high semantic similarity but low lexical overlap, it might be 
-    // a translation or a deep conceptual link.
     const STOP_WORDS = new Set(["the", "and", "for", "with", "that", "this", "los", "las", "con", "para", "que", "una", "uno", "del", "por", "des", "les", "une", "est"]);
     const promptLower = prompt.toLowerCase();
     const promptTokens = promptLower.split(/[\s,.;:!?]+/).filter(t => t.length > 2 && !STOP_WORDS.has(t));
@@ -72,7 +59,6 @@ async function main() {
 
     const seedIds = refinedSimilar.slice(0, 6).map(s => ({ id: s.id, activation: 1.0 }));
     const result = await spreadActivation(seedIds, 3, 0.48, 0.06);
-
 
     const simMap = new Map(refinedSimilar.map(s => [s.id, s.similarity]));
     const baseSimMap = new Map(similar.map(s => [s.id, s.similarity]));
@@ -104,13 +90,13 @@ async function main() {
       .sort((a, b) => b.score - a.score)
       .slice(0, TOP_K);
 
-    if (ranked.length === 0) process.exit(0);
+    if (ranked.length === 0) return null;
 
     // Build adjacency for descriptions
     const nodeMap = new Map(allNodes.map(n => [n.id, n.label]));
-    const allEdges = getAllEdges();
+    const allEdgesData = getAllEdges();
     const adjacency = new Map<string, Array<{ id: string; weight: number }>>();
-    for (const e of allEdges) {
+    for (const e of allEdgesData) {
       if (!adjacency.has(e.from_id)) adjacency.set(e.from_id, []);
       if (!adjacency.has(e.to_id))   adjacency.set(e.to_id,   []);
       adjacency.get(e.from_id)!.push({ id: e.to_id,   weight: e.weight });
@@ -134,7 +120,7 @@ async function main() {
       const related = neighbors.filter(nb => nb.weight >= 0.2 && nb.weight < 0.45).map(nb => nb.label);
 
       // Check for conceptual hubs (abstraction edges)
-      const hubEdges = allEdges.filter(e => (e.from_id === n.id || e.to_id === n.id) && e.type === "abstraction");
+      const hubEdges = allEdgesData.filter(e => (e.from_id === n.id || e.to_id === n.id) && e.type === "abstraction");
       const hubs = hubEdges.map(e => {
         const hubId = e.from_id === n.id ? e.to_id : e.from_id;
         return nodeMap.get(hubId);
@@ -165,21 +151,39 @@ async function main() {
       contextParts.push(`\n[Active Rules & Preferences]:\n${activeRules.join("\n")}`);
     }
 
-    const context = [
+    return [
       ...contextParts,
       ``,
       ...cards,
     ].join("\n");
+  } catch (err) {
+    return null;
+  }
+}
 
-    process.stdout.write(JSON.stringify({
-      hookSpecificOutput: {
-        hookEventName: "UserPromptSubmit",
-        additionalContext: context,
-      },
-    }));
+async function main() {
+  if (require.main !== module) return;
+
+  let raw = "";
+  for await (const chunk of process.stdin) raw += chunk;
+
+  let prompt = "";
+  try {
+    const input = JSON.parse(raw);
+    prompt = input.message ?? input.prompt ?? "";
   } catch {
     process.exit(0);
   }
+
+  const context = await queryMemory(prompt);
+  if (!context) process.exit(0);
+
+  process.stdout.write(JSON.stringify({
+    hookSpecificOutput: {
+      hookEventName: "UserPromptSubmit",
+      additionalContext: context,
+    },
+  }));
 }
 
 main();

@@ -3,7 +3,22 @@ import { v4 as uuidv4 } from "uuid";
 import path from "path";
 import fs from "fs";
 
-const DB_PATH = path.join(__dirname, "../data/memory.db");
+let DB_PATH = path.join(__dirname, "../data/memory.db");
+
+export function setDbPath(newPath: string): void {
+  DB_PATH = newPath;
+  if (_db) {
+    _db.close();
+    _db = null;
+  }
+}
+
+export function closeDb(): void {
+  if (_db) {
+    _db.close();
+    _db = null;
+  }
+}
 
 export interface MemoryNode {
   id: string;

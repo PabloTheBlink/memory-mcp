@@ -101,7 +101,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: "memory_recall",
-      description: "Search memories by semantic similarity and spreading activation.",
+      description: "MANDATORIO: Ejecutar al inicio de cada sesión con una consulta sobre 'preferencias del usuario' y 'reglas de estilo' para recuperar el contexto cognitivo. Busca memorias por similitud semántica y propagación de activación.",
       inputSchema: {
         type: "object",
         properties: {
@@ -118,7 +118,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: "memory_status",
-      description: "Show system stats and active context.",
+      description: "MANDATORIO: Ejecutar SIEMPRE al inicio de una nueva sesión para identificar el contexto activo, estadísticas del sistema y nodos principales de memoria.",
       inputSchema: { type: "object", properties: {} },
     },
     {
