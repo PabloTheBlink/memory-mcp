@@ -71,8 +71,6 @@ interface DuplicateCandidate {
   reason: string;
 }
 
-// Levenshtein distance to catch "pablo" vs "Pablo" type duplicates
-// and avoid flagging completely unrelated short labels
 function levenshtein(a: string, b: string): number {
   const m = a.length, n = b.length;
   const dp = Array.from({ length: m + 1 }, (_, i) =>
@@ -101,8 +99,6 @@ function findDuplicates(threshold = 0.92): DuplicateCandidate[] {
       const maxLen = Math.max(la.length, lb.length);
       const textSimilarity = 1 - lev / maxLen;
 
-      // If labels look nothing alike textually, the embedding similarity is a model artifact
-      // (short/proper nouns often get degenerate vectors in nomic-embed-text)
       const likelyFalsePositive = textSimilarity < 0.35;
 
       let reason = "";
@@ -119,7 +115,6 @@ function findDuplicates(threshold = 0.92): DuplicateCandidate[] {
   }
 
   return results.sort((a, b) => {
-    // Real duplicates first, false positives last
     if (a.likelyFalsePositive !== b.likelyFalsePositive)
       return a.likelyFalsePositive ? 1 : -1;
     return b.similarity - a.similarity;
@@ -127,11 +122,6 @@ function findDuplicates(threshold = 0.92): DuplicateCandidate[] {
 }
 
 // --- HTML ---
-
-
-function esc(s: string): string {
-  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
-}
 
 function json(res: http.ServerResponse, data: object, status = 200) {
   res.writeHead(status, { 
@@ -156,7 +146,6 @@ function buildGraphData() {
   const allEdges = getAllEdges();
   const ctxMap = nodeContexts();
 
-  // Assign a context color index to each unique context
   const ctxNames = Array.from(new Set(
     allNodes.filter(n => n.label.startsWith("[ctx:")).map(n => n.label.slice(5, -1))
   ));
@@ -224,6 +213,7 @@ function renderBrain(): string {
     color: #aaa;
     backdrop-filter: blur(8px);
     display: none;
+    z-index: 100;
   }
   #info-panel .label { font-size: 1rem; color: #fff; font-weight: 600; margin-bottom: 8px; word-break: break-word; }
   #info-panel .row { display: flex; justify-content: space-between; margin-bottom: 4px; }
@@ -238,13 +228,7 @@ function renderBrain(): string {
     position: fixed; top: 20px; left: 20px;
     display: flex; gap: 8px; align-items: center;
   }
-  #nav a {
-    background: rgba(10,14,24,0.85); border: 1px solid #1e2a3a;
-    color: #888; font-size: 0.8rem; padding: 6px 14px; border-radius: 6px;
-    text-decoration: none; backdrop-filter: blur(8px);
-  }
-  #nav a:hover { color: #fff; border-color: #334; }
-  #nav .title { color: #446; font-size: 0.75rem; }
+  #nav .title { color: #446; font-size: 0.75rem; font-weight: 800; letter-spacing: 1px; }
 
   #legend {
     position: fixed; bottom: 20px; left: 20px;
@@ -267,15 +251,12 @@ function renderBrain(): string {
     background: transparent; border: none; outline: none;
     color: #ccc; font-size: 0.85rem; width: 180px;
   }
-  #search input::placeholder { color: #333; }
 </style>
 </head>
 <body>
 <div id="svg-container"><svg id="graph"></svg></div>
 
-  <div id="nav">
-  <span class="title">MEMORY BRAIN</span>
-</div>
+<div id="nav"><span class="title">MEMORY BRAIN</span></div>
 
 <div id="info-panel">
   <div class="label" id="info-label"></div>
@@ -293,8 +274,7 @@ function renderBrain(): string {
   <div class="row"><div class="swatch" style="background:#38bdf8"></div><span>user context</span></div>
   <div id="legend-projects"></div>
   <div class="row"><div class="swatch" style="background:#94a3b8"></div><span>no context</span></div>
-  <div class="row"><div class="swatch" style="background:#ef4444"></div><span>Conflict (Resolution needed)</span></div>
-  <div class="row"><div class="swatch" style="background:#f97316"></div><span>Curiosity (Gap detected)</span></div>
+  <div class="row"><div class="swatch" style="background:#ef4444"></div><span>Conflict</span></div>
   <div style="margin-top:8px; border-top:1px solid #1e2a3a; padding-top:8px">
     <div class="row"><div class="line-swatch" style="background:#fbbf24"></div><span>abstraction</span></div>
     <div class="row"><div class="line-swatch" style="background:#f97316"></div><span>causal</span></div>
@@ -310,11 +290,11 @@ function renderBrain(): string {
 <script>
 const W = window.innerWidth, H = window.innerHeight;
 const svg = d3.select('#graph').attr('viewBox', [0,0,W,H]);
+const container = svg.append('g');
 
-// Glow filter
 const defs = svg.append('defs');
-['blue','purple','orange','green','white'].forEach((name, i) => {
-  const colors = { blue:'#38bdf8', purple:'#8b5cf6', orange:'#f97316', green:'#4ade80', white:'#e2e8f0' };
+['blue','purple','orange','green','white'].forEach(name => {
+  const colors = { blue:'#38bdf8', purple:'#8b5cf6', orange:'#f97316', green:'#4ade80', white:'#ffffff' };
   const f = defs.append('filter').attr('id', 'glow-'+name).attr('x','-50%').attr('y','-50%').attr('width','200%').attr('height','200%');
   f.append('feGaussianBlur').attr('stdDeviation','4').attr('result','blur');
   const merge = f.append('feMerge');
@@ -325,148 +305,146 @@ defs.append('filter').attr('id', 'glow-hub').attr('x','-50%').attr('y','-50%').a
   .append('feGaussianBlur').attr('stdDeviation','6').attr('result','blur');
 d3.select('#glow-hub').append('feMerge').selectAll('feMergeNode').data(['blur','SourceGraphic']).join('feMergeNode').attr('in',d=>d);
 
-// Project colors palette
+const gLinks = container.append('g').attr('class', 'links');
+const gNodes = container.append('g').attr('class', 'nodes');
+
+let nodes = [], links = [], nodeById = new Map();
+let sim, link, node;
+let ctxColor = {};
+let selected = null;
 const PROJECT_COLORS = ['#34d399','#fb923c','#f472b6','#facc15','#a78bfa','#22d3ee'];
 
-fetch('/api/graph').then(r => r.json()).then(({ nodes, links, ctxNames }) => {
-  // Map context name → color
-  const ctxColor = {};
+function nodeColor(n) {
+  if (n.label.startsWith('conflict:')) return '#ef4444';
+  if (n.isContext) return '#8b5cf6';
+  if (n.isHub) return '#fbbf24';
+  if (n.contexts.length > 0) {
+    const c = n.contexts.find(c => c !== 'user') ?? n.contexts[0];
+    return ctxColor[c] ?? '#94a3b8';
+  }
+  return '#94a3b8';
+}
+
+function nodeRadius(n) {
+  if (n.isContext) return 14 + n.access_count * 0.4;
+  if (n.isHub) return 16 + n.importance * 10;
+  return 5 + n.strength * 14 + Math.min(n.access_count, 20) * 0.3;
+}
+
+function linkColor(type) {
+  return { abstraction:'#fbbf24', causal:'#f97316', semantic:'#38bdf8', temporal:'#4ade80', episodic:'#c084fc' }[type] ?? '#888';
+}
+
+sim = d3.forceSimulation()
+  .force('link', d3.forceLink().id(d => d.id).distance(d => {
+    const s = nodeById.get(d.source.id ?? d.source);
+    const t = nodeById.get(d.target.id ?? d.target);
+    return (s?.isContext || t?.isContext) ? 80 : 120;
+  }))
+  .force('charge', d3.forceManyBody().strength(d => (d.isContext || d.isHub) ? -600 : -150))
+  .force('center', d3.forceCenter(W/2, H/2))
+  .force('collide', d3.forceCollide().radius(d => nodeRadius(d) + 12));
+
+svg.call(d3.zoom().scaleExtent([0.1, 4]).on('zoom', e => container.attr('transform', e.transform)));
+
+function highlight(d) {
+  const connectedIds = new Set([d.id]);
+  links.forEach(l => {
+    const sid = l.source.id ?? l.source;
+    const tid = l.target.id ?? l.target;
+    if (sid === d.id) connectedIds.add(tid);
+    if (tid === d.id) connectedIds.add(sid);
+  });
+  node.classed('dimmed', n => !connectedIds.has(n.id));
+  node.classed('hovered', n => n.id === d.id);
+  link.classed('dimmed', l => (l.source.id??l.source)!==d.id && (l.target.id??l.target)!==d.id);
+  link.classed('highlighted', l => (l.source.id??l.source)===d.id || (l.target.id??l.target)===d.id);
+
+  const panel = document.getElementById('info-panel');
+  panel.style.display = 'block';
+  document.getElementById('info-label').textContent = d.isContext ? d.contextName : (d.isHub ? d.label.replace('concept:','') : d.label);
+  document.getElementById('info-strength').textContent = d.strength.toFixed(3);
+  document.getElementById('info-importance').textContent = (d.importance || 0.5).toFixed(3);
+  document.getElementById('info-access').textContent = d.access_count;
+  document.getElementById('info-last').textContent = new Date(d.last_accessed_at).toLocaleDateString();
+  document.getElementById('info-contexts').innerHTML = d.contexts.map(c => '<span class="ctx-tag">' + c + '</span>').join('') || '<span style="color:#444">none</span>';
+}
+
+function clearHighlight() {
+  node.classed('dimmed hovered selected', false);
+  link.classed('dimmed highlighted', false);
+  document.getElementById('info-panel').style.display = 'none';
+  selected = null;
+}
+
+async function update() {
+  const data = await fetch('/api/graph').then(r => r.json());
+  const { nodes: newNodes, links: newLinks, ctxNames } = data;
+
   ctxNames.forEach((name, i) => {
-    ctxColor[name] = name === 'user' ? '#38bdf8' : PROJECT_COLORS[i % PROJECT_COLORS.length];
-  });
-
-  // Legend projects
-  ctxNames.filter(n => n !== 'user').forEach(name => {
-    d3.select('#legend-projects').append('div').attr('class','row').html(
-      \`<div class="swatch" style="background:\${ctxColor[name]}"></div><span>\${name}</span>\`
-    );
-  });
-
-  function nodeColor(n) {
-    if (n.label.startsWith('conflict:')) return '#ef4444';
-    if (n.label.startsWith('curiosity:')) return '#f97316';
-    if (n.isContext) return '#8b5cf6';
-    if (n.isHub) return '#fbbf24';
-    if (n.contexts.length > 0) {
-      const c = n.contexts.find(c => c !== 'user') ?? n.contexts[0];
-      return ctxColor[c] ?? '#94a3b8';
+    if (!ctxColor[name]) {
+      ctxColor[name] = name === 'user' ? '#38bdf8' : PROJECT_COLORS[i % PROJECT_COLORS.length];
+      if (name !== 'user') {
+        d3.select('#legend-projects').append('div').attr('class','row').html(
+          \`<div class="swatch" style="background:\${ctxColor[name]}"></div><span>\${name}</span>\`
+        );
+      }
     }
-    return '#94a3b8';
-  }
+  });
 
-  function nodeRadius(n) {
-    if (n.isContext) return 14 + n.access_count * 0.4;
-    if (n.isHub) return 16 + n.importance * 10;
-    return 5 + n.strength * 14 + Math.min(n.access_count, 20) * 0.3;
-  }
+  const oldNodeById = nodeById;
+  nodeById = new Map();
+  nodes = newNodes.map(nn => {
+    const existing = oldNodeById.get(nn.id);
+    if (existing) {
+      if (nn.last_fired_at > (existing.last_fired_at || 0)) existing._shouldSpike = true;
+      Object.assign(existing, nn);
+      nodeById.set(nn.id, existing);
+      return existing;
+    } else {
+      nn.x = W/2 + (Math.random()-0.5)*100;
+      nn.y = H/2 + (Math.random()-0.5)*100;
+      nn._isNew = true;
+      nodeById.set(nn.id, nn);
+      return nn;
+    }
+  });
 
-  function linkColor(type) {
-    return { abstraction:'#fbbf24', causal:'#f97316', semantic:'#38bdf8', temporal:'#4ade80', episodic:'#c084fc' }[type] ?? '#888';
-  }
+  links = newLinks.map(nl => {
+    const existing = links.find(l => (l.source.id || l.source) === nl.source && (l.target.id || l.target) === nl.target);
+    return existing ? Object.assign(existing, nl) : nl;
+  });
 
-  // Build id sets for fast lookup
-  const nodeById = new Map(nodes.map(n => [n.id, n]));
+  link = gLinks.selectAll('.link').data(links, d => \`\${d.source.id || d.source}-\${d.target.id || d.target}\`)
+    .join('line').attr('class','link').attr('stroke', d => linkColor(d.type)).attr('stroke-width', d => Math.max(0.5, d.weight * 3));
 
-  // Simulation
-  const sim = d3.forceSimulation(nodes)
-    .force('link', d3.forceLink(links).id(d => d.id).distance(d => {
-      const s = nodeById.get(d.source.id ?? d.source);
-      const t = nodeById.get(d.target.id ?? d.target);
-      if (s?.isContext || t?.isContext) return 80;
-      if (s?.isHub || t?.isHub) return 60;
-      return 120 / (d.weight + 0.1);
-    }).strength(d => d.weight * 0.4))
-    .force('charge', d3.forceManyBody().strength(d => (d.isContext || d.isHub) ? -500 : -120))
-    .force('center', d3.forceCenter(W/2, H/2))
-    .force('collide', d3.forceCollide().radius(d => nodeRadius(d) + 10));
-
-  const container = svg.append('g');
-
-  // Zoom + pan
-  svg.call(d3.zoom().scaleExtent([0.2, 4]).on('zoom', e => container.attr('transform', e.transform)));
-
-  // Links
-  const link = container.append('g').selectAll('line')
-    .data(links).join('line')
-    .attr('class','link')
-    .attr('stroke', d => linkColor(d.type))
-    .attr('stroke-width', d => Math.max(0.5, d.weight * 3));
-
-  // Nodes
-  const node = container.append('g').selectAll('g')
-    .data(nodes).join('g')
-    .attr('class','node')
-    .attr('id', d => \`node-\${d.id}\`)
+  node = gNodes.selectAll('.node').data(nodes, d => d.id)
+    .join(
+      enter => {
+        const g = enter.append('g').attr('class','node').attr('id', d => \`node-\${d.id}\`);
+        g.append('circle');
+        g.append('text');
+        return g;
+      },
+      update => update,
+      exit => exit.transition().duration(500).style('opacity', 0).remove()
+    )
     .call(d3.drag()
       .on('start', (e,d) => { if(!e.active) sim.alphaTarget(0.3).restart(); d.fx=d.x; d.fy=d.y; })
       .on('drag',  (e,d) => { d.fx=e.x; d.fy=e.y; })
-      .on('end',   (e,d) => { if(!e.active) sim.alphaTarget(0); d.fx=null; d.fy=null; })
-    );
+      .on('end',   (e,d) => { if(!e.active) sim.alphaTarget(0); d.fx=null; d.fy=null; }));
 
-  node.append('circle')
+  node.select('circle')
     .attr('r', d => nodeRadius(d))
     .attr('fill', d => nodeColor(d) + (d.isContext || d.isHub ? '22' : '18'))
     .attr('stroke', d => nodeColor(d))
     .attr('stroke-width', d => d.isContext || d.isHub || d.label.startsWith('conflict:') ? 2 : 1.5)
-    .attr('filter', d => {
-      if (d.label.startsWith('conflict:')) return 'url(#glow-orange)';
-      if (d.isHub) return 'url(#glow-hub)';
-      if (d.isContext) return 'url(#glow-purple)';
-      return 'url(#glow-blue)';
-    });
+    .attr('filter', d => d.isHub ? 'url(#glow-hub)' : (d.isContext ? 'url(#glow-purple)' : 'url(#glow-blue)'));
 
-  // Pulse ring for context nodes
-  node.filter(d => d.isContext).append('circle')
-    .attr('r', d => nodeRadius(d) + 6)
-    .attr('fill', 'none')
-    .attr('stroke', d => nodeColor(d))
-    .attr('stroke-width', 0.5)
-    .attr('opacity', 0.3)
-    .attr('stroke-dasharray', '3 3');
-
-  node.append('text')
+  node.select('text')
     .attr('dy', d => -(nodeRadius(d) + 6))
     .attr('text-anchor','middle')
     .text(d => d.isContext ? d.contextName : d.label);
-
-  // Hover / click
-  let selected = null;
-
-  function highlight(d) {
-    const connectedIds = new Set([d.id]);
-    links.forEach(l => {
-      const sid = l.source.id ?? l.source;
-      const tid = l.target.id ?? l.target;
-      if (sid === d.id) connectedIds.add(tid);
-      if (tid === d.id) connectedIds.add(sid);
-    });
-
-    node.classed('dimmed', n => !connectedIds.has(n.id));
-    node.classed('hovered', n => n.id === d.id);
-    link.classed('dimmed',      l => (l.source.id??l.source)!==d.id && (l.target.id??l.target)!==d.id);
-    link.classed('highlighted', l => (l.source.id??l.source)===d.id || (l.target.id??l.target)===d.id);
-
-    // Info panel
-    const panel = document.getElementById('info-panel');
-    panel.style.display = 'block';
-    document.getElementById('info-label').textContent = d.isContext ? d.contextName : (d.isHub ? d.label.replace('concept:','') : d.label);
-    document.getElementById('info-strength').textContent = d.strength.toFixed(3);
-    document.getElementById('info-importance').textContent = (d.importance || 0.5).toFixed(3);
-    document.getElementById('info-access').textContent = d.access_count;
-    document.getElementById('info-last').textContent = new Date(d.last_accessed_at).toLocaleDateString();
-    document.getElementById('info-contexts').innerHTML =
-      d.isContext
-        ? '<span class="ctx-tag">context hub</span>'
-        : (d.isHub ? '<span class="ctx-tag" style="background:#3a2a0a;color:#fbbf24">conceptual hub</span>' : '') + 
-          (d.contexts.length ? d.contexts.map(c => '<span class="ctx-tag">' + c + '</span>').join('') : (!d.isHub ? '<span style="color:#444">none</span>' : ''));
-  }
-
-  function clearHighlight() {
-    node.classed('dimmed hovered selected', false);
-    link.classed('dimmed highlighted', false);
-    document.getElementById('info-panel').style.display = 'none';
-    selected = null;
-  }
 
   node.on('mouseenter', (e,d) => { if (!selected) highlight(d); })
       .on('mouseleave', () => { if (!selected) clearHighlight(); })
@@ -478,82 +456,45 @@ fetch('/api/graph').then(r => r.json()).then(({ nodes, links, ctxNames }) => {
         highlight(d);
       });
 
-  svg.on('click', clearHighlight);
-
-  // Search
-  document.getElementById('search-input').addEventListener('input', e => {
-    const q = e.target.value.toLowerCase().trim();
-    if (!q) { node.classed('dimmed', false); link.classed('dimmed', false); return; }
-    node.classed('dimmed', n => !n.label.toLowerCase().includes(q));
-    link.classed('dimmed', true);
+  nodes.forEach(n => {
+    if (n._isNew || n._shouldSpike) {
+      const el = gNodes.select(\`#node-\${n.id}\`).select('circle');
+      if (el.empty()) return;
+      const baseR = nodeRadius(n);
+      const color = nodeColor(n);
+      const intensity = n._isNew ? 1.5 : (n.strength * 0.8 + 0.2);
+      el.interrupt()
+        .attr('r', baseR * (n._isNew ? 4 : 2))
+        .attr('stroke', '#ffffff').attr('stroke-width', 4 + intensity * 20).attr('filter', 'url(#glow-white)')
+        .transition().duration(n._isNew ? 1200 : 800).ease(d3.easeQuadOut)
+        .attr('r', baseR).attr('stroke', color).attr('stroke-width', n.isContext || n.isHub ? 2 : 1.5)
+        .attr('filter', n.isHub ? 'url(#glow-hub)' : (n.isContext ? 'url(#glow-purple)' : 'url(#glow-blue)'));
+      n._isNew = false; n._shouldSpike = false;
+    }
   });
 
-  // Tick
-  sim.on('tick', () => {
-    link.attr('x1',d=>d.source.x).attr('y1',d=>d.source.y)
-        .attr('x2',d=>d.target.x).attr('y2',d=>d.target.y);
-    node.attr('transform', d => \`translate(\${d.x},\${d.y})\`);
-  });
+  sim.nodes(nodes);
+  sim.force('link').links(links);
+  sim.alpha(0.05).restart();
+}
 
-  // Real-time polling for updates
-  setInterval(() => {
-    fetch('/api/graph').then(r => r.json()).then(data => {
-      data.nodes.forEach(nn => {
-        const existing = nodeById.get(nn.id);
-        if (existing && nn.last_fired_at > existing.last_fired_at) {
-          console.log('Spike:', nn.label);
-          existing.last_fired_at = nn.last_fired_at;
-          existing.strength = nn.strength;
-          existing.importance = nn.importance;
-               // Trigger Neuronal Spike (Refined)
-          const el = node.filter(d => d.id === nn.id).select('circle');
-          const baseR = nodeRadius(existing);
-          const color = nodeColor(existing);
-          const baseIntensity = (nn.strength * 0.8) + 0.2;
-          
-          // Staggered firing: small delay based on ID
-          const idShift = (parseInt(nn.id.slice(0, 8), 16) % 1000) / 1000;
-          
-          setTimeout(() => {
-            el.interrupt()
-              .attr('r', baseR * (1.5 + baseIntensity * 1.5))
-              .attr('stroke', '#ffffff')
-              .attr('stroke-width', 4 + baseIntensity * 20)
-              .attr('filter', 'url(#glow-white)')
-              .transition().duration(2000).ease(d3.easeQuadOut)
-              .attr('r', baseR)
-              .attr('stroke', color)
-              .attr('stroke-width', existing.isContext || existing.isHub ? 2 : 1.5)
-              .attr('filter', existing.isHub ? 'url(#glow-hub)' : (existing.isContext ? 'url(#glow-purple)' : 'url(#glow-blue)'));
-          }, idShift * 600);
-          
-          existing.last_fired_at = nn.last_fired_at;
-          existing.strength = nn.strength;
-          existing.importance = nn.importance;
-        }
-      });
-    });
-  }, 1000);
-
-  // Animate pulse on context nodes
-  function pulseContexts() {
-    container.selectAll('circle[stroke-dasharray]')
-      .transition().duration(2000).ease(d3.easeSinInOut)
-      .attr('r', function() { 
-        const d = d3.select(this.parentNode).datum();
-        return parseFloat(d.isContext ? nodeRadius(d) + 12 : 0); 
-      })
-      .attr('opacity', 0.05)
-      .transition().duration(2000).ease(d3.easeSinInOut)
-      .attr('r', function() { 
-        const d = d3.select(this.parentNode).datum();
-        return parseFloat(d.isContext ? nodeRadius(d) + 6 : 0); 
-      })
-      .attr('opacity', 0.3)
-      .on('end', pulseContexts);
-  }
-  pulseContexts();
+sim.on('tick', () => {
+  if (!link || !node) return;
+  link.attr('x1',d=>d.source.x).attr('y1',d=>d.source.y)
+      .attr('x2',d=>d.target.x).attr('y2',d=>d.target.y);
+  node.attr('transform', d => \`translate(\${d.x},\${d.y})\`);
 });
+
+svg.on('click', clearHighlight);
+document.getElementById('search-input').addEventListener('input', e => {
+  const q = e.target.value.toLowerCase().trim();
+  if (!q) { node.classed('dimmed', false); link.classed('dimmed', false); return; }
+  node.classed('dimmed', n => !n.label.toLowerCase().includes(q));
+  link.classed('dimmed', true);
+});
+
+update();
+setInterval(update, 1000);
 </script>
 </body>
 </html>`;
