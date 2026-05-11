@@ -146,6 +146,18 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       },
     },
     {
+      name: "memory_learn_rule",
+      description: "Store a permanent rule or preference (e.g. 'Always use pnpm', 'Prefer compact code'). This ensures future agent actions align with your style without repeating instructions.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          rule: { type: "string", description: "The rule or preference to learn" },
+          context: { type: "string", description: "Optional context for this rule" },
+        },
+        required: ["rule"],
+      },
+    },
+    {
       "name": "memory_replay",
       "description": "Follow temporal and causal links to reconstruct a narrative or sequence of events starting from a concept.",
       "inputSchema": {
@@ -165,6 +177,35 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
   try {
     switch (name) {
+      case "memory_learn_rule": {
+        const { rule, context: ruleCtx } = args as any;
+        const activeContext = ruleCtx || getActiveContext();
+        const label = `rule:${rule}`;
+
+        let node = findOrCreateNode(label, null, 1.0); // Rules are always important
+        if (!node.embedding) {
+          const emb = await getEmbedding(label);
+          updateNodeEmbedding(node.id, emb);
+        }
+
+        const contextNodeId = await ensureContextNode(activeContext);
+        bindToContext(node.id, contextNodeId);
+        touchNode(node.id);
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({ 
+                learned: rule, 
+                context: activeContext,
+                message: "Rule stored. I will recall this whenever relevant tasks arise to save you from repeating it." 
+              }),
+            },
+          ],
+        };
+      }
+
       case "memory_activate": {
         const { concept, importance = 0.5 } = args as any;
         const activeContext = getActiveContext();
@@ -311,13 +352,25 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           return { ...s, similarity: Math.min(1.0, s.similarity + insightBoost + importanceBoost) };
         }).sort((a, b) => b.similarity - a.similarity);
 
+        // Learning: specifically look for rules and preferences
+        const rules = allNodes
+          .filter(n => n.label.startsWith("rule:") || n.label.startsWith("preference:"))
+          .map(n => {
+             const sim = n.embedding ? cosineSimilarity(queryEmbedding, n.embedding) : 0;
+             return { label: n.label, sim };
+          })
+          .filter(r => r.sim > 0.35)
+          .sort((a, b) => b.sim - a.sim)
+          .slice(0, 5)
+          .map(r => r.label);
+
         const contextNodeId = await ensureContextNode(activeContext);
         const seeds: Array<{ id: string; activation: number }> = [
           { id: contextNodeId, activation: 0.5 }, // Strong context priming
           ...refinedSimilar.slice(0, 6).map((s) => ({ id: s.id, activation: 1.0 })),
         ];
 
-        if (seeds.length === 1) {
+        if (seeds.length === 1 && rules.length === 0) {
           return {
             content: [{ type: "text", text: JSON.stringify({ query, context: activeContext, results: [] }) }],
           };
@@ -332,7 +385,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const similarityMap = new Map(refinedSimilar.map((s) => [s.id, s.similarity]));
 
         const ranked = result.nodes
-          .filter((n) => !isContextNode(n.label))
+          .filter((n) => !isContextNode(n.label) && !n.label.startsWith("rule:") && !n.label.startsWith("preference:"))
           .map((n) => ({
             id: n.id,
             label: n.label,
@@ -378,6 +431,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               text: JSON.stringify({
                   query,
                   context: activeContext,
+                  active_rules: rules,
                   results: ranked.map(r => ({
                     label: r.label,
                     relevance: Math.round(r.relevance_score * 100) / 100,

@@ -141,7 +141,7 @@ export function runMaintenance(force = false): MaintenanceReport {
   }
 
   // ── Step 3: Auto-merge near-duplicates (Language Agnostic) ──────────────
-  const nodesForMerge = getAllNodes().filter(n => !n.label.startsWith("[ctx:"));
+  const nodesForMerge = getAllNodes().filter(n => !n.label.startsWith("[ctx:") && !n.label.startsWith("rule:") && !n.label.startsWith("preference:"));
 
   for (let i = 0; i < nodesForMerge.length; i++) {
     for (let j = i + 1; j < nodesForMerge.length; j++) {
@@ -190,8 +190,8 @@ export function runMaintenance(force = false): MaintenanceReport {
 
   for (const n of afterMerge) {
     if (connectedIds.has(n.id)) continue;
-    // Don't prune important or strong nodes, even if isolated
-    if (n.importance > 0.7 || n.strength > 0.4) continue;
+    // Don't prune important or strong nodes, even if isolated. Protect rules.
+    if (n.importance > 0.7 || n.strength > 0.4 || n.label.startsWith("rule:") || n.label.startsWith("preference:")) continue;
     
     if (n.strength > ORPHAN_MAX_STRENGTH) continue;
     const ageDays = (now - n.last_accessed_at) / (1000 * 60 * 60 * 24);

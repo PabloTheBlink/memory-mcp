@@ -8,7 +8,7 @@
  */
 
 import { getAllNodes, getAllEdges } from "./graph";
-import { getEmbedding, findSimilar } from "./embeddings";
+import { getEmbedding, findSimilar, cosineSimilarity } from "./embeddings";
 import { spreadActivation } from "./activation";
 
 const TOP_K = 5;
@@ -81,7 +81,7 @@ async function main() {
     const CODE_FILE_RE = /\.(ts|js|tsx|jsx|py|php|rb|go|rs|sh|md|json)$/i;
 
     const ranked = result.nodes
-      .filter(n => !n.label.startsWith("[ctx:"))
+      .filter(n => !n.label.startsWith("[ctx:") && !n.label.startsWith("rule:") && !n.label.startsWith("preference:"))
       .filter(n => {
         const sim = simMap.get(n.id) ?? 0;
         const baseSim = baseSimMap.get(n.id) ?? 0;
@@ -147,8 +147,26 @@ async function main() {
       return card;
     });
 
-    const context = [
+    // Fetch active rules relevant to the prompt
+    const activeRules = allNodes
+      .filter(n => n.label.startsWith("rule:") || n.label.startsWith("preference:"))
+      .map(n => ({ label: n.label, sim: n.embedding ? cosineSimilarity(embedding, n.embedding) : 0 }))
+      .filter(r => r.sim > 0.35)
+      .sort((a, b) => b.sim - a.sim)
+      .slice(0, 3)
+      .map(r => r.label.replace(/^(rule:|preference:)/, "• "));
+
+    const contextParts = [
       `[Memory Context — Associative recall optimized for current intent. Direct usage recommended.]`,
+      `[SYSTEM DIRECTIVE]: You are an autonomous agent with a persistent memory. ALWAYS use memory_recall at the start of a task to fetch user preferences and context. ALWAYS use memory_learn_rule or memory_activate to persist new patterns, style preferences, or technical insights. This reduces token waste and improves alignment.`,
+    ];
+
+    if (activeRules.length > 0) {
+      contextParts.push(`\n[Active Rules & Preferences]:\n${activeRules.join("\n")}`);
+    }
+
+    const context = [
+      ...contextParts,
       ``,
       ...cards,
     ].join("\n");
