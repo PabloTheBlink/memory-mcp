@@ -65,6 +65,7 @@ export interface MaintenanceReport {
   skipped?: boolean;
   decay: ReturnType<typeof consolidate> | null;
   semanticLinksAdded: number;
+  islandsLinked: number;
   newLinks: Array<{ a: string; b: string; similarity: number }>;
   autoMerged: number;
   merges: Array<{ kept: string; deleted: string; similarity: number }>;
@@ -80,6 +81,7 @@ export function runMaintenance(force = false): MaintenanceReport {
   const report: MaintenanceReport = {
     decay: null,
     semanticLinksAdded: 0,
+    islandsLinked: 0,
     newLinks: [],
     autoMerged: 0,
     merges: [],
@@ -319,6 +321,48 @@ export function runMaintenance(force = false): MaintenanceReport {
     }
   }
 
+  // ── Step 8.5: Islands Auto-Linking ──────────────────────────────────────────
+  // Identify nodes with 0 or 1 edges and force-link them to the most similar node
+  const ISLAND_LINK_THRESHOLD = 0.65; // Lower threshold to ensure islands get attached
+  const nodesForIslands = getAllNodes().filter(n => n.embedding !== null && !n.label.startsWith("[ctx:") && !n.label.startsWith("curiosity:"));
+  
+  // Re-build adjacency for current state
+  const currentEdges = getAllEdges();
+  const currentAdjacency = new Map<string, string[]>();
+  for (const e of currentEdges) {
+    if (!currentAdjacency.has(e.from_id)) currentAdjacency.set(e.from_id, []);
+    if (!currentAdjacency.has(e.to_id))   currentAdjacency.set(e.to_id,   []);
+    currentAdjacency.get(e.from_id)!.push(e.to_id);
+    currentAdjacency.get(e.to_id)!.push(e.from_id);
+  }
+
+  for (const node of nodesForIslands) {
+    const neighbors = currentAdjacency.get(node.id) ?? [];
+    if (neighbors.length <= 1) {
+      let bestMatch = null;
+      let highestSim = 0;
+
+      for (const target of nodesForIslands) {
+        if (target.id === node.id) continue;
+        if (hasEdge(node.id, target.id)) continue;
+        
+        const sim = cosineSimilarity(node.embedding!, target.embedding!);
+        if (sim > highestSim) {
+          highestSim = sim;
+          bestMatch = target;
+        }
+      }
+
+      if (bestMatch && highestSim >= ISLAND_LINK_THRESHOLD) {
+        upsertEdge(node.id, bestMatch.id, "semantic", 0.4);
+        report.islandsLinked++;
+        if (report.newLinks.length < 10) {
+          report.newLinks.push({ a: node.label, b: bestMatch.label, similarity: Math.round(highestSim * 100) / 100 });
+        }
+      }
+    }
+  }
+
   // ── Step 9: Importance Re-calibration (Long-term utility) ────────────────
   // Heuristic: If a node has high access count and was used across multiple days,
   // it is objectively important regardless of its initial importance score.
@@ -352,7 +396,7 @@ if (require.main === module) {
   process.stdout.write(JSON.stringify(report, null, 2) + "\n");
   process.stdout.write(`\n✓ Maintenance complete in ${report.durationMs}ms\n`);
   process.stdout.write(`  Decay: ${report.decay?.nodesDecayed ?? 0} nodes decayed, ${report.decay?.nodesDeleted ?? 0} deleted\n`);
-  process.stdout.write(`  Linked: ${report.semanticLinksAdded} new semantic edges\n`);
+  process.stdout.write(`  Linked: ${report.semanticLinksAdded} new semantic edges, ${report.islandsLinked} islands linked\n`);
   process.stdout.write(`  Merged: ${report.autoMerged} near-duplicate nodes\n`);
   process.stdout.write(`  Pruned: ${report.orphansPruned} orphan nodes\n`);
   process.stdout.write(`  Chunked: ${report.conceptualHubsCreated} conceptual hubs created\n`);
