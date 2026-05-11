@@ -1,36 +1,21 @@
-import Database from "better-sqlite3";
 import { v4 as uuidv4 } from "uuid";
-import path from "path";
-import fs from "fs";
+import { getDb, setDbPath, closeDb, DBAdapter } from "./db";
 
-let DB_PATH = path.join(__dirname, "../data/memory.db");
-
-export function setDbPath(newPath: string): void {
-  DB_PATH = newPath;
-  if (_db) {
-    _db.close();
-    _db = null;
-  }
-}
-
-export function closeDb(): void {
-  if (_db) {
-    _db.close();
-    _db = null;
-  }
-}
+export { getDb, setDbPath, closeDb };
 
 export interface MemoryNode {
   id: string;
   label: string;
   embedding: number[] | null;
   strength: number;
-  importance: number; // 0-1, how significant this memory is
+  importance: number;
   access_count: number;
   created_at: number;
   last_accessed_at: number;
   last_fired_at: number;
   metadata: Record<string, any> | null;
+  user_id: string | null;
+  visibility: "private" | "shared";
 }
 
 export interface MemoryEdge {
@@ -41,226 +26,11 @@ export interface MemoryEdge {
   co_occurrences: number;
   created_at: number;
   last_reinforced_at: number;
+  user_id: string | null;
 }
 
 export interface ActivatedNode extends MemoryNode {
   activation: number;
-}
-
-let _db: Database.Database | null = null;
-
-export function getDb(): Database.Database {
-  if (_db) return _db;
-
-  fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
-  _db = new Database(DB_PATH);
-  _db.pragma("journal_mode = WAL");
-  _db.pragma("foreign_keys = ON");
-  initSchema(_db);
-  return _db;
-}
-
-function initSchema(db: Database.Database): void {
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS nodes (
-      id TEXT PRIMARY KEY,
-      label TEXT NOT NULL UNIQUE,
-      embedding TEXT,
-      strength REAL NOT NULL DEFAULT 0.5,
-      importance REAL NOT NULL DEFAULT 0.5,
-      access_count INTEGER NOT NULL DEFAULT 0,
-      created_at INTEGER NOT NULL,
-      last_accessed_at INTEGER NOT NULL,
-      last_fired_at INTEGER NOT NULL DEFAULT 0,
-      metadata TEXT
-    );
-
-    CREATE TABLE IF NOT EXISTS edges (
-      from_id TEXT NOT NULL,
-      to_id TEXT NOT NULL,
-      weight REAL NOT NULL DEFAULT 0.5,
-      type TEXT NOT NULL DEFAULT 'semantic',
-      co_occurrences INTEGER NOT NULL DEFAULT 1,
-      created_at INTEGER NOT NULL,
-      last_reinforced_at INTEGER NOT NULL,
-      PRIMARY KEY (from_id, to_id),
-      FOREIGN KEY (from_id) REFERENCES nodes(id) ON DELETE CASCADE,
-      FOREIGN KEY (to_id) REFERENCES nodes(id) ON DELETE CASCADE
-    );
-
-    CREATE TABLE IF NOT EXISTS meta (
-      key TEXT PRIMARY KEY,
-      value TEXT NOT NULL
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_edges_from ON edges(from_id);
-    CREATE INDEX IF NOT EXISTS idx_edges_to ON edges(to_id);
-    CREATE INDEX IF NOT EXISTS idx_nodes_strength ON nodes(strength);
-    CREATE INDEX IF NOT EXISTS idx_nodes_label ON nodes(label);
-  `);
-
-  // Migration: Add metadata column if it doesn't exist
-  const info = db.prepare("PRAGMA table_info(nodes)").all() as any[];
-  if (!info.some(col => col.name === "metadata")) {
-    db.exec("ALTER TABLE nodes ADD COLUMN metadata TEXT");
-  }
-}
-
-export function findOrCreateNode(
-  label: string, 
-  embedding: number[] | null = null, 
-  importance: number = 0.5,
-  metadata: Record<string, any> | null = null
-): MemoryNode {
-  const db = getDb();
-  const now = Date.now();
-
-  const existing = db.prepare("SELECT * FROM nodes WHERE label = ?").get(label) as any;
-  if (existing) {
-    return deserializeNode(existing);
-  }
-
-  const id = uuidv4();
-  db.prepare(`
-    INSERT INTO nodes (id, label, embedding, strength, importance, access_count, created_at, last_accessed_at, last_fired_at, metadata)
-    VALUES (?, ?, ?, 0.5, ?, 0, ?, ?, 0, ?)
-  `).run(id, label, embedding ? JSON.stringify(embedding) : null, importance, now, now, metadata ? JSON.stringify(metadata) : null);
-
-  return { id, label, embedding, strength: 0.5, importance, access_count: 0, created_at: now, last_accessed_at: now, last_fired_at: 0, metadata };
-}
-
-export function getNodeById(id: string): MemoryNode | null {
-  const db = getDb();
-  const row = db.prepare("SELECT * FROM nodes WHERE id = ?").get(id) as any;
-  return row ? deserializeNode(row) : null;
-}
-
-export function getAllNodes(): MemoryNode[] {
-  const db = getDb();
-  return (db.prepare("SELECT * FROM nodes").all() as any[]).map(deserializeNode);
-}
-
-export function updateNodeEmbedding(id: string, embedding: number[]): void {
-  getDb().prepare("UPDATE nodes SET embedding = ? WHERE id = ?").run(JSON.stringify(embedding), id);
-}
-
-export function touchNode(id: string): void {
-  const now = Date.now();
-  getDb().prepare(`
-    UPDATE nodes SET last_accessed_at = ?, access_count = access_count + 1 WHERE id = ?
-  `).run(now, id);
-}
-
-export function fireNode(id: string): void {
-  const now = Date.now();
-  getDb().prepare(`
-    UPDATE nodes SET last_fired_at = ? WHERE id = ?
-  `).run(now, id);
-}
-
-export function getNeighbors(nodeId: string): Array<{ node: MemoryNode; edge: MemoryEdge }> {
-  const db = getDb();
-  const rows = db.prepare(`
-    SELECT n.*, e.weight, e.type, e.co_occurrences, e.created_at as edge_created_at,
-           e.last_reinforced_at, e.from_id, e.to_id
-    FROM edges e
-    JOIN nodes n ON (e.to_id = n.id OR e.from_id = n.id)
-    WHERE (e.from_id = ? OR e.to_id = ?) AND n.id != ?
-  `).all(nodeId, nodeId, nodeId) as any[];
-
-  return rows.map((r) => ({
-    node: deserializeNode(r),
-    edge: {
-      from_id: r.from_id,
-      to_id: r.to_id,
-      weight: r.weight,
-      type: r.type,
-      co_occurrences: r.co_occurrences,
-      created_at: r.edge_created_at,
-      last_reinforced_at: r.last_reinforced_at,
-    },
-  }));
-}
-
-export function upsertEdge(
-  fromId: string,
-  toId: string,
-  type: string,
-  strengthBoost: number = 0.1
-): MemoryEdge {
-  const db = getDb();
-  const now = Date.now();
-  const [a, b] = fromId < toId ? [fromId, toId] : [toId, fromId];
-
-  const existing = db.prepare("SELECT * FROM edges WHERE from_id = ? AND to_id = ?").get(a, b) as any;
-
-  if (existing) {
-    const newWeight = Math.min(1.0, existing.weight + strengthBoost);
-    db.prepare(`
-      UPDATE edges SET weight = ?, co_occurrences = co_occurrences + 1, last_reinforced_at = ?
-      WHERE from_id = ? AND to_id = ?
-    `).run(newWeight, now, a, b);
-    return deserializeEdge({ ...existing, weight: newWeight, co_occurrences: existing.co_occurrences + 1, last_reinforced_at: now });
-  }
-
-  const initialWeight = Math.min(1.0, 0.3 + strengthBoost);
-  db.prepare(`
-    INSERT INTO edges (from_id, to_id, weight, type, co_occurrences, created_at, last_reinforced_at)
-    VALUES (?, ?, ?, ?, 1, ?, ?)
-  `).run(a, b, initialWeight, type, now, now);
-
-  return { from_id: a, to_id: b, weight: initialWeight, type: type as any, co_occurrences: 1, created_at: now, last_reinforced_at: now };
-}
-
-export function getAllEdges(): MemoryEdge[] {
-  return (getDb().prepare("SELECT * FROM edges").all() as any[]).map(deserializeEdge);
-}
-
-export function deleteNode(id: string): void {
-  getDb().prepare("DELETE FROM nodes WHERE id = ?").run(id);
-}
-
-export function deleteEdge(fromId: string, toId: string): void {
-  const [a, b] = fromId < toId ? [fromId, toId] : [toId, fromId];
-  getDb().prepare("DELETE FROM edges WHERE from_id = ? AND to_id = ?").run(a, b);
-}
-
-export function updateNodeStrength(id: string, strength: number): void {
-  getDb().prepare("UPDATE nodes SET strength = ? WHERE id = ?").run(Math.max(0, Math.min(1, strength)), id);
-}
-
-export function updateNodeImportance(id: string, importance: number): void {
-  getDb().prepare("UPDATE nodes SET importance = ? WHERE id = ?").run(Math.max(0, Math.min(1, importance)), id);
-}
-
-export function updateEdgeWeight(fromId: string, toId: string, weight: number): void {
-  const [a, b] = fromId < toId ? [fromId, toId] : [toId, fromId];
-  getDb().prepare("UPDATE edges SET weight = ? WHERE from_id = ? AND to_id = ?").run(Math.max(0, Math.min(1, weight)), a, b);
-}
-
-export function getTopNodes(limit: number): MemoryNode[] {
-  return (getDb().prepare("SELECT * FROM nodes ORDER BY strength DESC LIMIT ?").all(limit) as any[]).map(deserializeNode);
-}
-
-export function getStats(): { nodeCount: number; edgeCount: number; lastConsolidation: number | null } {
-  const db = getDb();
-  const nodeCount = (db.prepare("SELECT COUNT(*) as c FROM nodes").get() as any).c;
-  const edgeCount = (db.prepare("SELECT COUNT(*) as c FROM edges").get() as any).c;
-  const meta = db.prepare("SELECT value FROM meta WHERE key = 'last_consolidation'").get() as any;
-  return {
-    nodeCount,
-    edgeCount,
-    lastConsolidation: meta ? parseInt(meta.value) : null,
-  };
-}
-
-export function setMeta(key: string, value: string): void {
-  getDb().prepare("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)").run(key, value);
-}
-
-export function getMeta(key: string): string | null {
-  const row = getDb().prepare("SELECT value FROM meta WHERE key = ?").get(key) as any;
-  return row ? row.value : null;
 }
 
 function deserializeNode(row: any): MemoryNode {
@@ -269,12 +39,14 @@ function deserializeNode(row: any): MemoryNode {
     label: row.label,
     embedding: row.embedding ? JSON.parse(row.embedding) : null,
     strength: row.strength,
-    importance: row.importance ?? 0.5,
+    importance: row.importance,
     access_count: row.access_count,
     created_at: row.created_at,
     last_accessed_at: row.last_accessed_at,
-    last_fired_at: row.last_fired_at ?? 0,
+    last_fired_at: row.last_fired_at || 0,
     metadata: row.metadata ? JSON.parse(row.metadata) : null,
+    user_id: row.user_id,
+    visibility: row.visibility || "private",
   };
 }
 
@@ -285,7 +57,241 @@ function deserializeEdge(row: any): MemoryEdge {
     weight: row.weight,
     type: row.type,
     co_occurrences: row.co_occurrences,
-    created_at: row.created_at,
+    created_at: row.edge_created_at || row.created_at,
     last_reinforced_at: row.last_reinforced_at,
+    user_id: row.user_id,
   };
 }
+
+export async function findOrCreateNode(
+  label: string, 
+  embedding: number[] | null = null, 
+  importance: number = 0.5,
+  metadata: Record<string, any> | null = null,
+  userId: string | null = null,
+  visibility: "private" | "shared" = "private"
+): Promise<MemoryNode> {
+  const db = await getDb();
+  const now = Date.now();
+
+  // Try to find a shared node first, or a private one for this user
+  let existing = await db.queryGet(
+    "SELECT * FROM nodes WHERE label = ? AND (visibility = 'shared' OR user_id = ?)", 
+    [label, userId]
+  );
+  
+  if (existing) {
+    return deserializeNode(existing);
+  }
+
+  const id = uuidv4();
+  await db.run(`
+    INSERT INTO nodes (id, label, embedding, strength, importance, access_count, created_at, last_accessed_at, last_fired_at, metadata, user_id, visibility)
+    VALUES (?, ?, ?, 0.5, ?, 0, ?, ?, 0, ?, ?, ?)
+  `, [id, label, embedding ? JSON.stringify(embedding) : null, importance, now, now, metadata ? JSON.stringify(metadata) : null, userId, visibility]);
+
+  return { id, label, embedding, strength: 0.5, importance, access_count: 0, created_at: now, last_accessed_at: now, last_fired_at: 0, metadata, user_id: userId, visibility };
+}
+
+export async function getNodeById(id: string): Promise<MemoryNode | null> {
+  const db = await getDb();
+  const row = await db.queryGet("SELECT * FROM nodes WHERE id = ?", [id]);
+  return row ? deserializeNode(row) : null;
+}
+
+export async function getAllNodes(userId?: string): Promise<MemoryNode[]> {
+  const db = await getDb();
+  let sql = "SELECT * FROM nodes";
+  let params: any[] = [];
+  
+  if (userId) {
+    sql += " WHERE user_id = ? OR visibility = 'shared'";
+    params.push(userId);
+  }
+  
+  const rows = await db.queryAll(sql, params);
+  return rows.map(deserializeNode);
+}
+
+export async function updateNodeEmbedding(id: string, embedding: number[]): Promise<void> {
+  const db = await getDb();
+  await db.run("UPDATE nodes SET embedding = ? WHERE id = ?", [JSON.stringify(embedding), id]);
+}
+
+export async function updateNodeImportance(id: string, importance: number): Promise<void> {
+  const db = await getDb();
+  await db.run("UPDATE nodes SET importance = ? WHERE id = ?", [importance, id]);
+}
+
+export async function updateNodeStrength(id: string, strength: number): Promise<void> {
+  const db = await getDb();
+  await db.run("UPDATE nodes SET strength = ? WHERE id = ?", [strength, id]);
+}
+
+export async function touchNode(id: string): Promise<void> {
+  const db = await getDb();
+  const now = Date.now();
+  await db.run("UPDATE nodes SET last_accessed_at = ?, access_count = access_count + 1 WHERE id = ?", [now, id]);
+}
+
+export async function fireNode(id: string): Promise<void> {
+  const db = await getDb();
+  const now = Date.now();
+  await db.run("UPDATE nodes SET last_fired_at = ? WHERE id = ?", [now, id]);
+}
+
+export async function deleteNode(id: string): Promise<void> {
+  const db = await getDb();
+  await db.run("DELETE FROM nodes WHERE id = ?", [id]);
+}
+
+export async function upsertEdge(
+  fromId: string,
+  toId: string,
+  type: string,
+  strengthBoost: number = 0.1,
+  userId: string | null = null
+): Promise<MemoryEdge> {
+  const db = await getDb();
+  const now = Date.now();
+  const DB_TYPE = (process.env.DB_TYPE || "").trim() === "mysql" ? "mysql" : "sqlite";
+  
+  const [a, b] = fromId < toId ? [fromId, toId] : [toId, fromId];
+
+  if (DB_TYPE === "mysql") {
+    await db.run(`
+      INSERT INTO edges (from_id, to_id, type, weight, created_at, last_reinforced_at, co_occurrences, user_id)
+      VALUES (?, ?, ?, ?, ?, ?, 1, ?)
+      ON DUPLICATE KEY UPDATE
+        weight = LEAST(1.0, weight + ?),
+        last_reinforced_at = ?,
+        co_occurrences = co_occurrences + 1
+    `, [a, b, type, strengthBoost, now, now, userId, strengthBoost, now]);
+  } else {
+    await db.run(`
+      INSERT INTO edges (from_id, to_id, type, weight, created_at, last_reinforced_at, co_occurrences, user_id)
+      VALUES (?, ?, ?, ?, ?, ?, 1, ?)
+      ON CONFLICT(from_id, to_id) DO UPDATE SET
+        weight = MIN(1.0, weight + ?),
+        last_reinforced_at = ?,
+        co_occurrences = co_occurrences + 1
+    `, [a, b, type, strengthBoost, now, now, userId, strengthBoost, now]);
+  }
+
+  return { from_id: a, to_id: b, weight: 0.5, type: type as any, co_occurrences: 1, created_at: now, last_reinforced_at: now, user_id: userId };
+}
+
+export async function updateEdgeWeight(fromId: string, toId: string, weight: number): Promise<void> {
+  const db = await getDb();
+  const [a, b] = fromId < toId ? [fromId, toId] : [toId, fromId];
+  await db.run("UPDATE edges SET weight = ? WHERE from_id = ? AND to_id = ?", [weight, a, b]);
+}
+
+export async function deleteEdge(fromId: string, toId: string): Promise<void> {
+  const db = await getDb();
+  const [a, b] = fromId < toId ? [fromId, toId] : [toId, fromId];
+  await db.run("DELETE FROM edges WHERE from_id = ? AND to_id = ?", [a, b]);
+}
+
+export async function getAllEdges(userId?: string): Promise<MemoryEdge[]> {
+  const db = await getDb();
+  let sql = "SELECT * FROM edges";
+  let params: any[] = [];
+  
+  if (userId) {
+    // Return edges where both nodes are visible to the user
+    // or edges created by the user
+    sql = `
+      SELECT e.* FROM edges e
+      JOIN nodes n1 ON e.from_id = n1.id
+      JOIN nodes n2 ON e.to_id = n2.id
+      WHERE (n1.user_id = ? OR n1.visibility = 'shared')
+      AND (n2.user_id = ? OR n2.visibility = 'shared')
+    `;
+    params = [userId, userId];
+  }
+  
+  const rows = await db.queryAll(sql, params);
+  return rows.map(deserializeEdge);
+}
+
+export async function getNeighbors(nodeId: string, userId?: string): Promise<Array<{ node: MemoryNode; edge: MemoryEdge }>> {
+  const db = await getDb();
+  let sql = `
+    SELECT n.*, e.weight, e.type, e.co_occurrences, e.created_at as edge_created_at,
+           e.last_reinforced_at, e.from_id, e.to_id, e.user_id as edge_user_id
+    FROM edges e
+    JOIN nodes n ON (e.to_id = n.id OR e.from_id = n.id)
+    WHERE (e.from_id = ? OR e.to_id = ?) AND n.id != ?
+  `;
+  const params: any[] = [nodeId, nodeId, nodeId];
+  
+  if (userId) {
+    sql += " AND (n.user_id = ? OR n.visibility = 'shared')";
+    params.push(userId);
+  }
+  
+  const rows = await db.queryAll(sql, params);
+
+  return rows.map((r: any) => ({
+    node: deserializeNode(r),
+    edge: deserializeEdge({ ...r, user_id: r.edge_user_id })
+  }));
+}
+
+export async function getTopNodes(limit: number = 50, userId?: string): Promise<MemoryNode[]> {
+  const db = await getDb();
+  let sql = "SELECT * FROM nodes";
+  const params: any[] = [];
+  
+  if (userId) {
+    sql += " WHERE user_id = ? OR visibility = 'shared'";
+    params.push(userId);
+  }
+  
+  sql += " ORDER BY (importance * 0.7 + strength * 0.3) DESC LIMIT ?";
+  params.push(limit);
+  
+  const rows = await db.queryAll(sql, params);
+  return rows.map(deserializeNode);
+}
+
+export async function getStats(userId?: string): Promise<{ nodes: number; edges: number; nodeCount: number; edgeCount: number }> {
+  const db = await getDb();
+  let nodeSql = "SELECT COUNT(*) as c FROM nodes";
+  let edgeSql = "SELECT COUNT(*) as c FROM edges";
+  const params: any[] = [];
+  
+  if (userId) {
+    nodeSql += " WHERE user_id = ? OR visibility = 'shared'";
+    edgeSql = `
+      SELECT COUNT(*) as c FROM edges e
+      JOIN nodes n1 ON e.from_id = n1.id
+      JOIN nodes n2 ON e.to_id = n2.id
+      WHERE (n1.user_id = ? OR n1.visibility = 'shared')
+      AND (n2.user_id = ? OR n2.visibility = 'shared')
+    `;
+    params.push(userId, userId);
+  }
+  
+  const nodes = await db.queryGet(nodeSql, userId ? [userId] : []);
+  const edges = await db.queryGet(edgeSql, params);
+  return { 
+    nodes: nodes.c, 
+    edges: edges.c,
+    nodeCount: nodes.c,
+    edgeCount: edges.c
+  };
+}
+
+export async function getMeta(key: string): Promise<string | null> {
+  const db = await getDb();
+  const row = await db.queryGet("SELECT value FROM meta WHERE `key` = ?", [key]);
+  return row ? row.value : null;
+}
+
+export async function setMeta(key: string, value: string): Promise<void> {
+  const db = await getDb();
+  await db.setMeta(key, value);
+}
+

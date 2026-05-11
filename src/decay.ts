@@ -23,7 +23,7 @@ export interface ConsolidationStats {
   edgesDeleted: number;
 }
 
-export function consolidate(): ConsolidationStats {
+export async function consolidate(): Promise<ConsolidationStats> {
   const stats: ConsolidationStats = {
     nodesProcessed: 0,
     nodesDecayed: 0,
@@ -35,7 +35,7 @@ export function consolidate(): ConsolidationStats {
   };
 
   const now = Date.now();
-  const nodes = getAllNodes();
+  const nodes = await getAllNodes();
   stats.nodesProcessed = nodes.length;
 
   // ── Step 1.5: Interference (Inhibition) ─────────────────────────────
@@ -85,7 +85,7 @@ export function consolidate(): ConsolidationStats {
       : NODE_DELETION_THRESHOLD;
 
     if (newStrength < effectiveDeletionThreshold) {
-      deleteNode(node.id);
+      await deleteNode(node.id);
       stats.nodesDeleted++;
     } else {
       // If the node was accessed very recently, we reinforce it based on its current decay state.
@@ -95,16 +95,16 @@ export function consolidate(): ConsolidationStats {
         const retrievalEffort = 1.0 + (1.0 - retention);
         const reinforcement = STRENGTH_BOOST * (1.0 + node.importance) * retrievalEffort;
         newStrength = Math.min(1.0, newStrength + reinforcement);
-        updateNodeStrength(node.id, newStrength);
+        await updateNodeStrength(node.id, newStrength);
         stats.nodesStrengthened++;
       } else {
-        updateNodeStrength(node.id, newStrength);
+        await updateNodeStrength(node.id, newStrength);
         stats.nodesDecayed++;
       }
     }
   }
 
-  const edges = getAllEdges();
+  const edges = await getAllEdges();
   stats.edgesProcessed = edges.length;
 
   for (const edge of edges) {
@@ -114,15 +114,15 @@ export function consolidate(): ConsolidationStats {
     const newWeight = edge.weight * retention;
 
     if (newWeight < EDGE_DELETION_THRESHOLD) {
-      deleteEdge(edge.from_id, edge.to_id);
+      await deleteEdge(edge.from_id, edge.to_id);
       stats.edgesDeleted++;
     } else {
-      updateEdgeWeight(edge.from_id, edge.to_id, newWeight);
+      await updateEdgeWeight(edge.from_id, edge.to_id, newWeight);
       stats.edgesDecayed++;
     }
   }
 
 
-  setMeta("last_consolidation", String(now));
+  await setMeta("last_consolidation", String(now));
   return stats;
 }

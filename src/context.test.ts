@@ -48,7 +48,7 @@ describe('context', () => {
 
   it('should ensure context node exists', async () => {
     const contextId = await ensureContextNode('my-project');
-    const nodes = getAllNodes();
+    const nodes = await getAllNodes();
     expect(nodes).toHaveLength(1);
     expect(nodes[0].id).toBe(contextId);
     expect(nodes[0].label).toBe('[ctx:my-project]');
@@ -56,7 +56,7 @@ describe('context', () => {
 
   it('should bind node to context', async () => {
     const ctxId = await ensureContextNode('my-project');
-    const node = findOrCreateNode('node-1');
+    const node = await findOrCreateNode('node-1');
     bindToContext(node.id, ctxId);
   });
 });

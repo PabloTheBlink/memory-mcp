@@ -29,8 +29,8 @@ describe('query', () => {
   });
 
   it('should return context when similar nodes are found', async () => {
-    const n1 = findOrCreateNode('Relevant Memory');
-    updateNodeEmbedding(n1.id, new Array(384).fill(0.1));
+    const n1 = await findOrCreateNode('Relevant Memory');
+    await updateNodeEmbedding(n1.id, new Array(384).fill(0.1));
     
     // Mock findSimilar to return our node
     vi.mocked(embeddings.findSimilar).mockReturnValue([
@@ -44,11 +44,11 @@ describe('query', () => {
   });
 
   it('should include active rules in context', async () => {
-    const rule = findOrCreateNode('rule:Use TypeScript');
-    updateNodeEmbedding(rule.id, new Array(384).fill(0.1));
+    const rule = await findOrCreateNode('rule:Use TypeScript');
+    await updateNodeEmbedding(rule.id, new Array(384).fill(0.1));
     
-    const n1 = findOrCreateNode('Other Memory');
-    updateNodeEmbedding(n1.id, new Array(384).fill(0.1));
+    const n1 = await findOrCreateNode('Other Memory');
+    await updateNodeEmbedding(n1.id, new Array(384).fill(0.1));
 
     // Mock findSimilar to return at least one memory so we don't bail early
     vi.mocked(embeddings.findSimilar).mockReturnValue([

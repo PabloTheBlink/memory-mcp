@@ -14,9 +14,9 @@ describe('activation', () => {
   });
 
   it('should spread activation to neighbors', async () => {
-    const n1 = findOrCreateNode('n1');
-    const n2 = findOrCreateNode('n2');
-    upsertEdge(n1.id, n2.id, 'semantic');
+    const n1 = await findOrCreateNode('n1');
+    const n2 = await findOrCreateNode('n2');
+    await upsertEdge(n1.id, n2.id, 'semantic');
 
     const result = await spreadActivation([{ id: n1.id, activation: 1.0 }]);
     
@@ -27,17 +27,17 @@ describe('activation', () => {
   });
 
   it('should respect context inhibition', async () => {
-    const ctx = findOrCreateNode('context-node');
-    const n1 = findOrCreateNode('in-context');
-    const n2 = findOrCreateNode('out-of-context');
-    const seed = findOrCreateNode('seed');
+    const ctx = await findOrCreateNode('context-node');
+    const n1 = await findOrCreateNode('in-context');
+    const n2 = await findOrCreateNode('out-of-context');
+    const seed = await findOrCreateNode('seed');
 
     // seed is linked to both
-    upsertEdge(seed.id, n1.id, 'semantic');
-    upsertEdge(seed.id, n2.id, 'semantic');
+    await upsertEdge(seed.id, n1.id, 'semantic');
+    await upsertEdge(seed.id, n2.id, 'semantic');
 
     // n1 is linked to context
-    upsertEdge(ctx.id, n1.id, 'episodic');
+    await upsertEdge(ctx.id, n1.id, 'episodic');
 
     // Spread with context
     const result = await spreadActivation(
@@ -57,14 +57,14 @@ describe('activation', () => {
   });
 
   it('should respect maxDepth', async () => {
-    const n1 = findOrCreateNode('n1');
-    const n2 = findOrCreateNode('n2');
-    const n3 = findOrCreateNode('n3');
-    const n4 = findOrCreateNode('n4');
+    const n1 = await findOrCreateNode('n1');
+    const n2 = await findOrCreateNode('n2');
+    const n3 = await findOrCreateNode('n3');
+    const n4 = await findOrCreateNode('n4');
 
-    upsertEdge(n1.id, n2.id, 'semantic');
-    upsertEdge(n2.id, n3.id, 'semantic');
-    upsertEdge(n3.id, n4.id, 'semantic');
+    await upsertEdge(n1.id, n2.id, 'semantic');
+    await upsertEdge(n2.id, n3.id, 'semantic');
+    await upsertEdge(n3.id, n4.id, 'semantic');
 
     const result = await spreadActivation([{ id: n1.id, activation: 1.0 }], 2, 0.5, 0.01);
     

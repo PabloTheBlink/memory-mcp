@@ -1,4 +1,9 @@
-import { pipeline } from '@xenova/transformers';
+import { pipeline, env } from '@xenova/transformers';
+
+// Disable progress bars and logging to stdout, which would break the MCP protocol
+(env as any).showProgressBar = false;
+(env as any).allowRemoteModels = true; 
+(env as any).allowLocalModels = true;
 
 let extractor: any = null;
 

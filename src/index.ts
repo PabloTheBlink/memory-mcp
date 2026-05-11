@@ -1,5 +1,16 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+
+// Intercept stdout to prevent non-JSON messages (from wrappers like tsx) from breaking the MCP protocol
+const originalStdoutWrite = process.stdout.write.bind(process.stdout);
+(process.stdout.write as any) = (chunk: any, encoding: any, callback: any) => {
+  const str = typeof chunk === 'string' ? chunk : chunk.toString();
+  if (str.trim().startsWith('{') || str.trim().startsWith('[')) {
+    return originalStdoutWrite(chunk, encoding, callback);
+  }
+  return process.stderr.write(chunk, encoding, callback);
+};
+
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
@@ -31,17 +42,19 @@ import {
   contextLabel,
   isContextNode,
   detectContext,
+  getDeviceId,
+  setActiveContext,
 } from "./context";
 
 const EMBEDDING_MODEL_ID = "Xenova/all-MiniLM-L6-v2";
 
 async function runReindexingIfNeeded() {
-  const storedModel = getMeta("embedding_model");
+  const storedModel = await getMeta("embedding_model");
   if (storedModel === EMBEDDING_MODEL_ID) return;
 
   process.stderr.write(`Re-indexing memory: switching from ${storedModel || "unknown"} to ${EMBEDDING_MODEL_ID}...\n`);
 
-  const nodes = getAllNodes();
+  const nodes = await getAllNodes(); // Re-indexing needs to touch everything
   process.stderr.write(`Re-indexing ${nodes.length} nodes...\n`);
   
   const CHUNK_SIZE = 20;
@@ -50,7 +63,7 @@ async function runReindexingIfNeeded() {
     try {
       const embeddings = await getEmbeddings(chunk.map(n => n.label));
       for (let j = 0; j < chunk.length; j++) {
-        updateNodeEmbedding(chunk[j].id, embeddings[j]);
+        await updateNodeEmbedding(chunk[j].id, embeddings[j]);
       }
       if (i % 40 === 0) process.stderr.write(`Progress: ${i}/${nodes.length}\n`);
     } catch (e) {
@@ -58,7 +71,7 @@ async function runReindexingIfNeeded() {
     }
   }
 
-  setMeta("embedding_model", EMBEDDING_MODEL_ID);
+  await setMeta("embedding_model", EMBEDDING_MODEL_ID);
   process.stderr.write(`Re-indexing complete. Nodes updated.\n`);
 }
 
@@ -179,18 +192,24 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     switch (name) {
       case "memory_learn_rule": {
         const { rule, context: ruleCtx } = args as any;
-        const activeContext = ruleCtx || getActiveContext();
+        const deviceId = getDeviceId();
+        const activeContext = ruleCtx || await getActiveContext();
         const label = `rule:${rule}`;
 
-        let node = findOrCreateNode(label, null, 1.0); // Rules are always important
+        let node = await findOrCreateNode(label, null, 1.0, null, deviceId, "private"); // Rules are usually private
         if (!node.embedding) {
           const emb = await getEmbedding(label);
-          updateNodeEmbedding(node.id, emb);
+          await updateNodeEmbedding(node.id, emb);
         }
 
         const contextNodeId = await ensureContextNode(activeContext);
-        bindToContext(node.id, contextNodeId);
-        touchNode(node.id);
+        await bindToContext(node.id, contextNodeId);
+
+        // Bind to device context
+        const deviceNodeId = await ensureContextNode(`device:${deviceId}`);
+        await bindToContext(node.id, deviceNodeId);
+
+        await touchNode(node.id);
 
         return {
           content: [
@@ -199,6 +218,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               text: JSON.stringify({ 
                 learned: rule, 
                 context: activeContext,
+                user_id: deviceId,
                 message: "Rule stored. I will recall this whenever relevant tasks arise to save you from repeating it." 
               }),
             },
@@ -208,41 +228,49 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case "memory_activate": {
         const { concept, importance = 0.5 } = args as any;
-        const activeContext = getActiveContext();
+        const deviceId = getDeviceId();
+        const activeContext = await getActiveContext();
+        
+        // Projects and conceptual hubs are shared by default
+        const visibility = (concept.startsWith("project:") || concept.startsWith("concept:")) ? "shared" : "private";
 
-        let node = findOrCreateNode(concept, null, importance);
+        let node = await findOrCreateNode(concept, null, importance, null, deviceId, visibility);
         if (!node.embedding) {
           const emb = await getEmbedding(concept);
-          updateNodeEmbedding(node.id, emb);
+          await updateNodeEmbedding(node.id, emb);
           node = { ...node, embedding: emb };
         }
         
         // Update importance if it changed significantly
         if (importance !== 0.5 && Math.abs(node.importance - importance) > 0.1) {
-          updateNodeImportance(node.id, (node.importance + importance) / 2);
+          await updateNodeImportance(node.id, (node.importance + importance) / 2);
         }
 
         // Find semantically similar nodes and wire them
-        const allNodes = getAllNodes();
+        const allNodes = await getAllNodes(deviceId);
         const similar = findSimilar(node.embedding!, allNodes, 0.78, 20).filter((s) => s.id !== node.id);
         for (const s of similar.slice(0, 4)) {
-          upsertEdge(node.id, s.id, "semantic", s.similarity * 0.12);
+          await upsertEdge(node.id, s.id, "semantic", s.similarity * 0.12, deviceId);
         }
 
         // Human-like: Temporal Co-occurrence (Episodic memory)
         // Link to recently activated nodes in this context
-        const lastActivatedId = getMeta(`last_act_${activeContext}`);
+        const lastActivatedId = await getMeta(`last_act_${activeContext}_${deviceId}`);
         if (lastActivatedId && lastActivatedId !== node.id) {
-          upsertEdge(node.id, lastActivatedId, "temporal", 0.25);
+          await upsertEdge(node.id, lastActivatedId, "temporal", 0.25, deviceId);
         }
-        setMeta(`last_act_${activeContext}`, node.id);
+        await setMeta(`last_act_${activeContext}_${deviceId}`, node.id);
 
         // Bind to active context
         const contextNodeId = await ensureContextNode(activeContext);
-        bindToContext(node.id, contextNodeId);
+        await bindToContext(node.id, contextNodeId);
 
-        touchNode(node.id);
-        fireNode(node.id);
+        // Bind to device context for multi-user identification
+        const deviceNodeId = await ensureContextNode(`device:${deviceId}`);
+        await bindToContext(node.id, deviceNodeId);
+
+        await touchNode(node.id);
+        await fireNode(node.id);
 
         // Spread activation (Higher depth for initialization)
         const result = await spreadActivation(
@@ -281,30 +309,39 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case "memory_associate": {
         const { concept_a, concept_b, type = "semantic", strength } = args as any;
-        const activeContext = getActiveContext();
+        const deviceId = getDeviceId();
+        const activeContext = await getActiveContext();
 
-        let nodeA = findOrCreateNode(concept_a);
-        let nodeB = findOrCreateNode(concept_b);
+        // Determine visibility based on content
+        const visibility = (concept_a.startsWith("project:") || concept_b.startsWith("project:")) ? "shared" : "private";
+
+        let nodeA = await findOrCreateNode(concept_a, null, 0.5, null, deviceId, visibility);
+        let nodeB = await findOrCreateNode(concept_b, null, 0.5, null, deviceId, visibility);
 
         if (!nodeA.embedding) {
           const emb = await getEmbedding(concept_a);
-          updateNodeEmbedding(nodeA.id, emb);
+          await updateNodeEmbedding(nodeA.id, emb);
         }
         if (!nodeB.embedding) {
           const emb = await getEmbedding(concept_b);
-          updateNodeEmbedding(nodeB.id, emb);
+          await updateNodeEmbedding(nodeB.id, emb);
         }
 
         const boost = strength !== undefined ? strength * 0.25 : 0.15;
-        upsertEdge(nodeA.id, nodeB.id, type, boost);
+        await upsertEdge(nodeA.id, nodeB.id, type, boost, deviceId);
 
         // Bind both to context
         const contextNodeId = await ensureContextNode(activeContext);
         bindToContext(nodeA.id, contextNodeId);
         bindToContext(nodeB.id, contextNodeId);
 
-        touchNode(nodeA.id);
-        touchNode(nodeB.id);
+        // Bind to device context
+        const deviceNodeId = await ensureContextNode(`device:${deviceId}`);
+        bindToContext(nodeA.id, deviceNodeId);
+        bindToContext(nodeB.id, deviceNodeId);
+
+        await touchNode(nodeA.id);
+        await touchNode(nodeB.id);
 
         return {
           content: [
@@ -313,6 +350,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               text: JSON.stringify({
                   associated: `${concept_a} <-> ${concept_b}`,
                   type,
+                  visibility,
                   context: activeContext,
                 }),
             },
@@ -322,10 +360,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case "memory_recall": {
         const { query, top_k = 10 } = args as any;
-        const activeContext = getActiveContext();
+        const deviceId = getDeviceId();
+        const activeContext = await getActiveContext();
 
         const queryEmbedding = await getEmbedding(query);
-        const allNodes = getAllNodes();
+        const allNodes = await getAllNodes(deviceId);
         
         // 0.32 threshold for cross-language recall
         const similar = findSimilar(queryEmbedding, allNodes, 0.30, top_k * 4);
@@ -365,8 +404,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           .map(r => r.label);
 
         const contextNodeId = await ensureContextNode(activeContext);
+        const deviceNodeId = await ensureContextNode(`device:${deviceId}`);
         const seeds: Array<{ id: string; activation: number }> = [
-          { id: contextNodeId, activation: 0.5 }, // Strong context priming
+          { id: contextNodeId, activation: 0.4 }, // Strong context priming
+          { id: deviceNodeId, activation: 0.3 },  // Device priming for identity/preferences
           ...refinedSimilar.slice(0, 6).map((s) => ({ id: s.id, activation: 1.0 })),
         ];
 
@@ -377,12 +418,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
 
         for (const { id } of seeds) {
-          touchNode(id);
-          fireNode(id);
+          await touchNode(id);
+          await fireNode(id);
         }
         // Also fire the top results to make them flash
         for (const n of refinedSimilar.slice(0, 10)) {
-          fireNode(n.id);
+          await fireNode(n.id);
         }
         const result = await spreadActivation(seeds, 3, 0.48, 0.05, contextNodeId);
 
@@ -405,7 +446,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         // Build adjacency
         const nodeMap = new Map(allNodes.map((n) => [n.id, n.label]));
-        const allEdgesForRecall = getAllEdges();
+        const allEdgesForRecall = await getAllEdges(deviceId);
         const adjacency = new Map<string, Array<{ label: string; weight: number }>>();
         for (const e of allEdgesForRecall) {
           if (!adjacency.has(e.from_id)) adjacency.set(e.from_id, []);
@@ -421,7 +462,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // Reinforce associations (Long Term Potentiation)
         const contextNodeIdForReinforcement = await ensureContextNode(activeContext);
         for (const n of ranked.slice(0, 3)) {
-          upsertEdge(n.id, contextNodeIdForReinforcement, "episodic", 0.1);
+          await upsertEdge(n.id, contextNodeIdForReinforcement, "episodic", 0.1, deviceId);
           n.connected_to = (adjacency.get(n.id) ?? [])
             .sort((a, b) => b.weight - a.weight)
             .slice(0, 5)
@@ -448,7 +489,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "memory_consolidate": {
-        const stats = consolidate();
+        const stats = await consolidate();
         return {
           content: [{ type: "text", text: JSON.stringify({ consolidation: stats }) }],
         };
@@ -456,16 +497,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case "memory_maintenance": {
         const force = (args as any)?.force === true;
-        const report = runMaintenance(force);
+        const report = await runMaintenance(force);
         return {
           content: [{ type: "text", text: JSON.stringify(report) }],
         };
       }
 
       case "memory_status": {
-        const stats = getStats();
-        const topNodes = getTopNodes(10);
-        const activeContext = getActiveContext();
+        const deviceId = getDeviceId();
+        const stats = await getStats(deviceId);
+        const topNodes = await getTopNodes(10, deviceId);
+        const activeContext = await getActiveContext();
 
         return {
           content: [
@@ -473,6 +515,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               type: "text",
               text: JSON.stringify({
                   context: activeContext,
+                  device_id: deviceId,
                   stats: { nodes: stats.nodeCount, edges: stats.edgeCount },
                   top_memories: topNodes.map((n) => n.label),
                 }),
@@ -485,7 +528,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const contextArg = (args as any).context as string | undefined;
         const context = contextArg?.trim() ? contextArg.trim() : detectContext();
 
-        setMeta("active_context", context);
+        await setActiveContext(context);
         const contextNodeId = await ensureContextNode(context);
 
         // Activate context node to prime it
@@ -503,14 +546,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case "memory_replay": {
         const { start_concept, depth = 5 } = args as any;
-        const startNode = findOrCreateNode(start_concept);
+        const startNode = await findOrCreateNode(start_concept);
         
         const path: string[] = [startNode.label];
         const visited = new Set<string>([startNode.id]);
         let currentId = startNode.id;
 
         for (let i = 0; i < depth; i++) {
-          const neighbors = getNeighbors(currentId);
+          const neighbors = await getNeighbors(currentId);
           // Prefer temporal or causal links for narrative flow
           const next = neighbors
             .filter((n: any) => !visited.has(n.node.id) && !isContextNode(n.node.label))
@@ -555,7 +598,7 @@ async function main() {
 
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  process.stderr.write("memory-mcp v1.1 running (local embeddings)\n");
+  // process.stderr.write("memory-mcp v1.1 running (local embeddings)\n");
 }
 
 main().catch((err) => {

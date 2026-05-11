@@ -19,12 +19,12 @@ export async function spreadActivation(
   const contextNeighbors = new Set<string>();
   if (activeContextNodeId) {
     contextNeighbors.add(activeContextNodeId);
-    getNeighbors(activeContextNodeId).forEach(n => contextNeighbors.add(n.node.id));
+    (await getNeighbors(activeContextNodeId)).forEach(n => contextNeighbors.add(n.node.id));
   }
 
   for (const { id, activation } of seeds) {
     activations.set(id, activation);
-    touchNode(id);
+    await touchNode(id);
   }
 
   const queue: Array<{ id: string; activation: number; depth: number }> = seeds.map(
@@ -37,7 +37,7 @@ export async function spreadActivation(
     const { id, activation, depth } = queue.shift()!;
     if (depth >= maxDepth) continue;
 
-    const neighbors = getNeighbors(id);
+    const neighbors = await getNeighbors(id);
     const degreePenalty = Math.max(0.7, 1.0 - (neighbors.length * 0.02));
 
     const currentActivation = activations.get(id) ?? 0;
@@ -85,7 +85,7 @@ export async function spreadActivation(
       if (nextActivation > current + 0.03) {
         activations.set(node.id, nextActivation);
         fatigue.set(node.id, nodeFatigue + 0.25); 
-        fireNode(node.id); 
+        await fireNode(node.id); 
         queue.push({ id: node.id, activation: nextActivation, depth: depth + 1 });
       }
     }
@@ -93,7 +93,7 @@ export async function spreadActivation(
 
   const nodes: ActivatedNode[] = [];
   for (const [nodeId, activation] of activations) {
-    const n = getNodeById(nodeId);
+    const n = await getNodeById(nodeId);
     if (n) nodes.push({ ...n, activation });
   }
 

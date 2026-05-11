@@ -20,7 +20,7 @@ export async function queryMemory(prompt: string): Promise<string | null> {
 
   try {
     const embedding = await getEmbedding(prompt);
-    const allNodes = getAllNodes();
+    const allNodes = await getAllNodes();
     // Scoring parameters
     const SIM_WEIGHT = 0.50;
     const ACT_WEIGHT = 0.35;
@@ -94,7 +94,7 @@ export async function queryMemory(prompt: string): Promise<string | null> {
 
     // Build adjacency for descriptions
     const nodeMap = new Map(allNodes.map(n => [n.id, n.label]));
-    const allEdgesData = getAllEdges();
+    const allEdgesData = await getAllEdges();
     const adjacency = new Map<string, Array<{ id: string; weight: number }>>();
     for (const e of allEdgesData) {
       if (!adjacency.has(e.from_id)) adjacency.set(e.from_id, []);

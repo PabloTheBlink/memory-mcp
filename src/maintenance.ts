@@ -39,31 +39,33 @@ function textSimilarity(a: string, b: string): number {
   return 1 - levenshtein(la, lb) / Math.max(la.length, lb.length);
 }
 
-function hasEdge(fromId: string, toId: string): boolean {
+async function hasEdge(fromId: string, toId: string): Promise<boolean> {
   const [a, b] = fromId < toId ? [fromId, toId] : [toId, fromId];
-  return !!getDb().prepare("SELECT 1 FROM edges WHERE from_id = ? AND to_id = ?").get(a, b);
+  const db = await getDb();
+  const row = await db.queryGet("SELECT 1 FROM edges WHERE from_id = ? AND to_id = ?", [a, b]);
+  return !!row;
 }
 
-function rewireEdges(fromId: string, toId: string): void {
-  const db = getDb();
-  const edges = db.prepare("SELECT * FROM edges WHERE from_id = ? OR to_id = ?").all(fromId, fromId) as any[];
+async function rewireEdges(fromId: string, toId: string): Promise<void> {
+  const db = await getDb();
+  const edges = await db.queryAll("SELECT * FROM edges WHERE from_id = ? OR to_id = ?", [fromId, fromId]);
   for (const e of edges) {
     const src = e.from_id === fromId ? toId : e.from_id;
     const dst = e.to_id   === fromId ? toId : e.to_id;
     if (src === dst) continue;
     const [a, b] = src < dst ? [src, dst] : [dst, src];
-    if (!getDb().prepare("SELECT 1 FROM edges WHERE from_id = ? AND to_id = ?").get(a, b)) {
-      db.prepare(`INSERT INTO edges (from_id,to_id,weight,type,co_occurrences,created_at,last_reinforced_at)
-                  VALUES (?,?,?,?,?,?,?)`)
-        .run(a, b, e.weight, e.type, e.co_occurrences, e.created_at, e.last_reinforced_at);
+    const exists = await db.queryGet("SELECT 1 FROM edges WHERE from_id = ? AND to_id = ?", [a, b]);
+    if (!exists) {
+      await db.run(`INSERT INTO edges (from_id,to_id,weight,type,co_occurrences,created_at,last_reinforced_at)
+                  VALUES (?,?,?,?,?,?,?)`, [a, b, e.weight, e.type, e.co_occurrences, e.created_at, e.last_reinforced_at]);
     }
   }
-  db.prepare("DELETE FROM edges WHERE from_id = ? OR to_id = ?").run(fromId, fromId);
+  await db.run("DELETE FROM edges WHERE from_id = ? OR to_id = ?", [fromId, fromId]);
 }
 
 export interface MaintenanceReport {
   skipped?: boolean;
-  decay: ReturnType<typeof consolidate> | null;
+  decay: Awaited<ReturnType<typeof consolidate>> | null;
   semanticLinksAdded: number;
   islandsLinked: number;
   newLinks: Array<{ a: string; b: string; similarity: number }>;
@@ -76,7 +78,7 @@ export interface MaintenanceReport {
   durationMs: number;
 }
 
-export function runMaintenance(force = false): MaintenanceReport {
+export async function runMaintenance(force = false): Promise<MaintenanceReport> {
   const start = Date.now();
   const report: MaintenanceReport = {
     decay: null,
@@ -94,7 +96,7 @@ export function runMaintenance(force = false): MaintenanceReport {
 
   // Rate-limit: skip if run recently (unless forced)
   if (!force) {
-    const last = getMeta("last_maintenance");
+    const last = await getMeta("last_maintenance");
     if (last) {
       const elapsedHours = (Date.now() - parseInt(last)) / (1000 * 60 * 60);
       if (elapsedHours < MIN_INTERVAL_HOURS) {
@@ -104,16 +106,20 @@ export function runMaintenance(force = false): MaintenanceReport {
   }
 
   // ── Step 1: Ebbinghaus decay ────────────────────────────────────────────
-  report.decay = consolidate();
+  report.decay = await consolidate();
 
   // ── Step 2: Semantic linking & Synonym detection ────────────────────────
   // After decay, reload nodes (some may have been deleted)
-  const nodes = getAllNodes().filter(n => n.embedding !== null);
+  const nodes = (await getAllNodes()).filter(n => n.embedding !== null);
 
   for (let i = 0; i < nodes.length; i++) {
     for (let j = i + 1; j < nodes.length; j++) {
       const a = nodes[i], b = nodes[j];
-      if (hasEdge(a.id, b.id)) continue;
+      
+      // Only link nodes from the same user or if both are shared
+      if (a.user_id !== b.user_id && (a.visibility !== 'shared' || b.visibility !== 'shared')) continue;
+      
+      if (await hasEdge(a.id, b.id)) continue;
 
       const sim = cosineSimilarity(a.embedding!, b.embedding!);
       if (sim < SEMANTIC_LINK_THRESHOLD) continue;
@@ -123,17 +129,15 @@ export function runMaintenance(force = false): MaintenanceReport {
       if (aIsCtx !== bIsCtx) continue; 
 
       // Language-agnostic detection:
-      // If embedding similarity is extremely high (> 0.94) but text similarity is low,
-      // it's likely a translation or a deep synonym.
       const textSim = textSimilarity(a.label, b.label);
       const isSynonym = sim >= 0.94 && textSim < 0.3;
 
       const weight = isSynonym
-        ? 0.9 // Stronger link for cross-language synonyms
+        ? 0.9 
         : (sim - SEMANTIC_LINK_THRESHOLD) / (1 - SEMANTIC_LINK_THRESHOLD) * 0.4;
 
-      const type = isSynonym ? "semantic" : "semantic"; // Keeping type simple for now but weight conveys strength
-      upsertEdge(a.id, b.id, type, weight);
+      const type = "semantic";
+      await upsertEdge(a.id, b.id, type, weight, a.user_id);
       
       report.semanticLinksAdded++;
       if (report.newLinks.length < 10) {
@@ -143,11 +147,15 @@ export function runMaintenance(force = false): MaintenanceReport {
   }
 
   // ── Step 3: Auto-merge near-duplicates (Language Agnostic) ──────────────
-  const nodesForMerge = getAllNodes().filter(n => !n.label.startsWith("[ctx:") && !n.label.startsWith("rule:") && !n.label.startsWith("preference:"));
+  const nodesForMerge = (await getAllNodes()).filter(n => !n.label.startsWith("[ctx:") && !n.label.startsWith("rule:") && !n.label.startsWith("preference:"));
 
   for (let i = 0; i < nodesForMerge.length; i++) {
     for (let j = i + 1; j < nodesForMerge.length; j++) {
       const a = nodesForMerge[i], b = nodesForMerge[j];
+      
+      // Only merge nodes from the same user
+      if (a.user_id !== b.user_id) continue;
+      
       const la = a.label.toLowerCase().trim();
       const lb = b.label.toLowerCase().trim();
 
@@ -159,10 +167,9 @@ export function runMaintenance(force = false): MaintenanceReport {
         ? cosineSimilarity(a.embedding, b.embedding)
         : 0;
 
-      // Language-agnostic merge: relax text requirements if embeddings are strongly similar.
-      // This helps merge "pablo" and "Pablo" but also cross-language "Cat" and "Gato".
-      const embMatch = embSim >= 0.94; // Strong semantic equivalence for synonyms/translations
-      const mixedMatch = embSim >= 0.88 && textSim >= 0.5; // Good confidence + some lexical hint
+      // Language-agnostic merge
+      const embMatch = embSim >= 0.94; 
+      const mixedMatch = embSim >= 0.88 && textSim >= 0.5; 
 
       if (!exactMatch && !textMatch && !embMatch && !mixedMatch) continue;
 
@@ -171,8 +178,8 @@ export function runMaintenance(force = false): MaintenanceReport {
       const bRank = b.access_count * (1 + b.importance);
       const [keep, del] = aRank >= bRank ? [a, b] : [b, a];
       
-      rewireEdges(del.id, keep.id);
-      deleteNode(del.id);
+      await rewireEdges(del.id, keep.id);
+      await deleteNode(del.id);
 
       report.autoMerged++;
       if (report.merges.length < 10) {
@@ -186,8 +193,8 @@ export function runMaintenance(force = false): MaintenanceReport {
 
   // ── Step 4: Orphan pruning ──────────────────────────────────────────────
   const now = Date.now();
-  const afterMerge = getAllNodes();
-  const allEdges = getAllEdges();
+  const afterMerge = await getAllNodes();
+  const allEdges = await getAllEdges();
   const connectedIds = new Set(allEdges.flatMap(e => [e.from_id, e.to_id]));
 
   for (const n of afterMerge) {
@@ -198,12 +205,12 @@ export function runMaintenance(force = false): MaintenanceReport {
     if (n.strength > ORPHAN_MAX_STRENGTH) continue;
     const ageDays = (now - n.last_accessed_at) / (1000 * 60 * 60 * 24);
     if (ageDays < ORPHAN_MIN_AGE_DAYS) continue;
-    deleteNode(n.id);
+    await deleteNode(n.id);
     report.orphansPruned++;
   }
 
   // ── Build Adjacency Map for Analysis ────────────────────────────────────
-  const allEdgesForAnalysis = getAllEdges();
+  const allEdgesForAnalysis = await getAllEdges();
   const adjacency = new Map<string, string[]>();
   for (const e of allEdgesForAnalysis) {
     if (!adjacency.has(e.from_id)) adjacency.set(e.from_id, []);
@@ -214,7 +221,7 @@ export function runMaintenance(force = false): MaintenanceReport {
 
   // ── Step 5: Centrality-based Importance Boost (Human focus) ─────────────
   const { updateNodeImportance } = require("./graph");
-  const nodesAfterPrune = getAllNodes();
+  const nodesAfterPrune = await getAllNodes();
 
   for (const node of nodesAfterPrune) {
     const neighbors = adjacency.get(node.id) ?? [];
@@ -223,7 +230,7 @@ export function runMaintenance(force = false): MaintenanceReport {
       const centralityBoost = Math.min(0.2, neighbors.length * 0.02);
       const newImportance = Math.min(1.0, (node.importance || 0.5) + centralityBoost);
       if (newImportance > (node.importance || 0.5) + 0.01) {
-        updateNodeImportance(node.id, newImportance);
+        await updateNodeImportance(node.id, newImportance);
       }
     }
   }
@@ -260,10 +267,10 @@ export function runMaintenance(force = false): MaintenanceReport {
         const hubLabel = `concept:${sorted[0].label} & others`;
         
         const { findOrCreateNode: createNode } = require("./graph");
-        const hub = createNode(hubLabel, null, 0.7); 
+        const hub = await createNode(hubLabel, null, 0.7, null, sorted[0].user_id, "shared"); 
         
         for (const member of cluster) {
-          upsertEdge(hub.id, member.id, "abstraction", 0.6);
+          await upsertEdge(hub.id, member.id, "abstraction", 0.6, member.user_id);
           processedForChunk.add(member.id);
         }
         
@@ -275,7 +282,7 @@ export function runMaintenance(force = false): MaintenanceReport {
 
   // ── Step 7: Conflict Detection (Heuristic) ───────────────────────────────
   const NEGATION_WORDS = new Set(["no", "never", "not", "nunca", "jamas", "jamás", "neither", "nor", "tampoco"]);
-  const nodesForConflict = getAllNodes().filter(n => !n.label.startsWith("["));
+  const nodesForConflict = (await getAllNodes()).filter(n => !n.label.startsWith("["));
 
   for (let i = 0; i < nodesForConflict.length; i++) {
     for (let j = i + 1; j < nodesForConflict.length; j++) {
@@ -292,13 +299,13 @@ export function runMaintenance(force = false): MaintenanceReport {
       const hasNegB = tokensB.some(t => NEGATION_WORDS.has(t));
 
       if (hasNegA !== hasNegB) {
-        // Potential contradiction detected (e.g. "I like coffee" vs "I do not like coffee")
+        // Potential contradiction detected
         const conflictLabel = `conflict:${a.label} VS ${b.label}`;
         const { findOrCreateNode: createNode } = require("./graph");
-        const conflictNode = createNode(conflictLabel, null, 0.9); // High importance to draw attention
+        const conflictNode = await createNode(conflictLabel, null, 0.9, null, a.user_id, a.visibility); 
         
-        upsertEdge(conflictNode.id, a.id, "causal", 0.5);
-        upsertEdge(conflictNode.id, b.id, "causal", 0.5);
+        await upsertEdge(conflictNode.id, a.id, "causal", 0.5, a.user_id);
+        await upsertEdge(conflictNode.id, b.id, "causal", 0.5, b.user_id);
         
         report.hubs.push(conflictLabel);
       }
@@ -306,7 +313,7 @@ export function runMaintenance(force = false): MaintenanceReport {
   }
 
   // ── Step 8: Curiosity Engine (Knowledge Gap Detection) ──────────────────
-  const nodesAfterConflict = getAllNodes();
+  const nodesAfterConflict = await getAllNodes();
   for (const node of nodesAfterConflict) {
     if (node.label.startsWith("[") || node.label.startsWith("concept:") || node.label.startsWith("conflict:")) continue;
     
@@ -315,8 +322,8 @@ export function runMaintenance(force = false): MaintenanceReport {
     if (node.importance > 0.7 && neighbors.length < 2) {
       const curiosityLabel = `curiosity:Tell me more about "${node.label}" to bridge knowledge gaps`;
       const { findOrCreateNode: createNode } = require("./graph");
-      const curiosityNode = createNode(curiosityLabel, null, 0.4);
-      upsertEdge(curiosityNode.id, node.id, "semantic", 0.3);
+      const curiosityNode = await createNode(curiosityLabel, null, 0.4, null, node.user_id, node.visibility);
+      await upsertEdge(curiosityNode.id, node.id, "semantic", 0.3, node.user_id);
       report.hubs.push(curiosityLabel);
     }
   }
@@ -324,10 +331,10 @@ export function runMaintenance(force = false): MaintenanceReport {
   // ── Step 8.5: Islands Auto-Linking ──────────────────────────────────────────
   // Identify nodes with 0 or 1 edges and force-link them to the most similar node
   const ISLAND_LINK_THRESHOLD = 0.65; // Lower threshold to ensure islands get attached
-  const nodesForIslands = getAllNodes().filter(n => n.embedding !== null && !n.label.startsWith("[ctx:") && !n.label.startsWith("curiosity:"));
+  const nodesForIslands = (await getAllNodes()).filter(n => n.embedding !== null && !n.label.startsWith("[ctx:") && !n.label.startsWith("curiosity:"));
   
   // Re-build adjacency for current state
-  const currentEdges = getAllEdges();
+  const currentEdges = await getAllEdges();
   const currentAdjacency = new Map<string, string[]>();
   for (const e of currentEdges) {
     if (!currentAdjacency.has(e.from_id)) currentAdjacency.set(e.from_id, []);
@@ -344,7 +351,7 @@ export function runMaintenance(force = false): MaintenanceReport {
 
       for (const target of nodesForIslands) {
         if (target.id === node.id) continue;
-        if (hasEdge(node.id, target.id)) continue;
+        if (await hasEdge(node.id, target.id)) continue;
         
         const sim = cosineSimilarity(node.embedding!, target.embedding!);
         if (sim > highestSim) {
@@ -354,7 +361,7 @@ export function runMaintenance(force = false): MaintenanceReport {
       }
 
       if (bestMatch && highestSim >= ISLAND_LINK_THRESHOLD) {
-        upsertEdge(node.id, bestMatch.id, "semantic", 0.4);
+        await upsertEdge(node.id, bestMatch.id, "semantic", 0.4, node.user_id);
         report.islandsLinked++;
         if (report.newLinks.length < 10) {
           report.newLinks.push({ a: node.label, b: bestMatch.label, similarity: Math.round(highestSim * 100) / 100 });
@@ -373,31 +380,33 @@ export function runMaintenance(force = false): MaintenanceReport {
       const utilityScore = Math.min(0.4, (node.access_count / lifespanDays) * 0.1);
       const newImportance = Math.min(1.0, (node.importance || 0.5) + utilityScore);
       if (newImportance > (node.importance || 0.5) + 0.05) {
-        updateNodeImportance(node.id, newImportance);
+        await updateNodeImportance(node.id, newImportance);
       }
     }
   }
 
-  setMeta("last_maintenance", String(now));
+  await setMeta("last_maintenance", String(now));
   report.durationMs = Date.now() - start;
   return report;
 }
 
 // ── CLI entry point ─────────────────────────────────────────────────────────
-if (require.main === module) {
-  const force = process.argv.includes("--force");
-  const report = runMaintenance(force);
+(async () => {
+  if (require.main === module) {
+    const force = process.argv.includes("--force");
+    const report = await runMaintenance(force);
 
-  if (report.skipped) {
-    process.stdout.write("Skipped (ran recently). Use --force to override.\n");
-    process.exit(0);
+    if (report.skipped) {
+      process.stdout.write("Skipped (ran recently). Use --force to override.\n");
+      process.exit(0);
+    }
+
+    process.stdout.write(JSON.stringify(report, null, 2) + "\n");
+    process.stdout.write(`\n✓ Maintenance complete in ${report.durationMs}ms\n`);
+    process.stdout.write(`  Decay: ${report.decay?.nodesDecayed ?? 0} nodes decayed, ${report.decay?.nodesDeleted ?? 0} deleted\n`);
+    process.stdout.write(`  Linked: ${report.semanticLinksAdded} new semantic edges, ${report.islandsLinked} islands linked\n`);
+    process.stdout.write(`  Merged: ${report.autoMerged} near-duplicate nodes\n`);
+    process.stdout.write(`  Pruned: ${report.orphansPruned} orphan nodes\n`);
+    process.stdout.write(`  Chunked: ${report.conceptualHubsCreated} conceptual hubs created\n`);
   }
-
-  process.stdout.write(JSON.stringify(report, null, 2) + "\n");
-  process.stdout.write(`\n✓ Maintenance complete in ${report.durationMs}ms\n`);
-  process.stdout.write(`  Decay: ${report.decay?.nodesDecayed ?? 0} nodes decayed, ${report.decay?.nodesDeleted ?? 0} deleted\n`);
-  process.stdout.write(`  Linked: ${report.semanticLinksAdded} new semantic edges, ${report.islandsLinked} islands linked\n`);
-  process.stdout.write(`  Merged: ${report.autoMerged} near-duplicate nodes\n`);
-  process.stdout.write(`  Pruned: ${report.orphansPruned} orphan nodes\n`);
-  process.stdout.write(`  Chunked: ${report.conceptualHubsCreated} conceptual hubs created\n`);
-}
+})();
