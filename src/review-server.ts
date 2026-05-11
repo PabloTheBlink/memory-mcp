@@ -516,11 +516,11 @@ fetch('/api/graph').then(r => r.json()).then(({ nodes, links, ctxNames }) => {
           
           setTimeout(() => {
             el.interrupt()
-              .attr('r', baseR * (1.2 + baseIntensity * 0.8))
+              .attr('r', baseR * (1.5 + baseIntensity * 1.5))
               .attr('stroke', '#ffffff')
-              .attr('stroke-width', 2 + baseIntensity * 12)
+              .attr('stroke-width', 4 + baseIntensity * 20)
               .attr('filter', 'url(#glow-white)')
-              .transition().duration(4000).ease(d3.easeQuadOut)
+              .transition().duration(2000).ease(d3.easeQuadOut)
               .attr('r', baseR)
               .attr('stroke', color)
               .attr('stroke-width', existing.isContext || existing.isHub ? 2 : 1.5)

@@ -34,7 +34,7 @@ describe('query', () => {
     
     // Mock findSimilar to return our node
     vi.mocked(embeddings.findSimilar).mockReturnValue([
-      { id: n1.id, label: n1.label, similarity: 0.9 }
+      { id: n1.id, similarity: 0.9 }
     ]);
 
     const result = await queryMemory('Tell me about my relevant memory');
@@ -52,7 +52,7 @@ describe('query', () => {
 
     // Mock findSimilar to return at least one memory so we don't bail early
     vi.mocked(embeddings.findSimilar).mockReturnValue([
-      { id: n1.id, label: n1.label, similarity: 0.9 }
+      { id: n1.id, similarity: 0.9 }
     ]);
     
     const result = await queryMemory('How should I code?');

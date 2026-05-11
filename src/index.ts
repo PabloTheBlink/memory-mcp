@@ -20,7 +20,7 @@ import {
   getMeta,
   getNeighbors,
 } from "./graph";
-import { getEmbedding, getEmbeddings, findSimilar } from "./embeddings";
+import { getEmbedding, getEmbeddings, findSimilar, cosineSimilarity } from "./embeddings";
 import { spreadActivation } from "./activation";
 import { consolidate } from "./decay";
 import { runMaintenance } from "./maintenance";
@@ -59,7 +59,7 @@ async function runReindexingIfNeeded() {
   }
 
   setMeta("embedding_model", EMBEDDING_MODEL_ID);
-  process.stderr.write(`Re-indexing complete. ${count} nodes updated.\n`);
+  process.stderr.write(`Re-indexing complete. Nodes updated.\n`);
 }
 
 const server = new Server(
@@ -379,6 +379,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         for (const { id } of seeds) {
           touchNode(id);
           fireNode(id);
+        }
+        // Also fire the top results to make them flash
+        for (const n of refinedSimilar.slice(0, 10)) {
+          fireNode(n.id);
         }
         const result = await spreadActivation(seeds, 3, 0.48, 0.05, contextNodeId);
 

@@ -15,7 +15,7 @@ Associative memory (SQLite) for agents.
 - **Maintenance**: Rate-limited (1/hr). Merges duplicates using embedding + Levenshtein.
 
 ## Setup
-Requires local Ollama (`nomic-embed-text`) at `http://localhost:11434`.
+No requires external dependencies like Ollama. It uses local embeddings via `@xenova/transformers` (model: `nomic-embed-text` or `all-MiniLM-L6-v2`).
 
 ## Protocolo de Inicio (MANDATORIO)
 Antes de realizar cualquier tarea o responder a la primera petición del usuario en cada nueva sesión, el agente DEBE:
