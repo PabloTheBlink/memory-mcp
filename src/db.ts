@@ -186,7 +186,7 @@ class MysqlAdapter implements DBAdapter {
       const addColumn = async (table: string, col: string, type: string) => {
         const [cols] = await conn.query<any>(`SHOW COLUMNS FROM ?? LIKE ?`, [table, col]);
         if (cols.length === 0) {
-          await conn.query(`ALTER TABLE ?? ADD COLUMN ?? \${type}\`, [table, col]);
+          await conn.query(`ALTER TABLE ?? ADD COLUMN ?? ${type}`, [table, col]);
         }
       };
 

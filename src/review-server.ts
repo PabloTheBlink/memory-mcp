@@ -329,7 +329,7 @@ const gLinks = container.append('g').attr('class', 'links');
 const gNodes = container.append('g').attr('class', 'nodes');
 
 let nodes = [], links = [], nodeById = new Map();
-let sim, link, node;
+let sim, link, node, selected = null;
 let userColor = {};
 let userCenters = {};
 const USER_PALETTES = [
@@ -341,11 +341,18 @@ const USER_PALETTES = [
 ];
 
 function getNodeColor(n) {
-  if (n.visibility === 'shared') return '#10b981';
+  if (n.visibility === 'shared') return '#10b981'; // Emerald for shared
+  if (n.isContext) return '#8b5cf6';             // Purple for context
+  if (n.isHub) return '#fbbf24';                 // Amber for hubs
   if (n.user_id) {
     return userColor[n.user_id] || '#94a3b8';
   }
   return '#94a3b8';
+}
+
+function getUserStroke(n) {
+  if (n.visibility === 'shared') return '#10b981';
+  return userColor[n.user_id] || '#94a3b8';
 }
 
 function nodeRadius(n) {
@@ -494,13 +501,15 @@ async function update() {
 
   node.select('circle')
     .attr('r', d => nodeRadius(d))
-    .attr('fill', d => getNodeColor(d) + '15')
-    .attr('stroke', d => getNodeColor(d))
-    .attr('stroke-width', d => d.isContext || d.isHub ? 2 : 1.2)
+    .attr('fill', d => getNodeColor(d) + '22')
+    .attr('stroke', d => getUserStroke(d))
+    .attr('stroke-width', d => d.isContext || d.isHub ? 2.5 : 1.5)
     .attr('filter', d => {
         if (d.visibility === 'shared') return 'url(#glow-emerald)';
-        if (d.isContext) return 'url(#glow-purple)';
-        return 'url(#glow-blue)';
+        const uid = d.user_id;
+        const paletteIndex = Array.from(new Set(nodes.map(n => n.user_id))).indexOf(uid);
+        const glowNames = ['blue','purple','orange','green','white','emerald'];
+        return \`url(#glow-\${glowNames[paletteIndex % glowNames.length]})\`;
     });
 
   node.select('text')
@@ -524,12 +533,20 @@ async function update() {
       if (el.empty()) return;
       const baseR = nodeRadius(n);
       const color = getNodeColor(n);
+      const stroke = getUserStroke(n);
       el.interrupt()
         .attr('r', baseR * 3)
         .attr('stroke', '#ffffff').attr('stroke-width', 6).attr('filter', 'url(#glow-white)')
         .transition().duration(n._isNew ? 1000 : 600).ease(d3.easeQuadOut)
-        .attr('r', baseR).attr('stroke', color).attr('stroke-width', n.isContext || n.isHub ? 2 : 1.2)
-        .attr('filter', n.visibility === 'shared' ? 'url(#glow-emerald)' : (n.isContext ? 'url(#glow-purple)' : 'url(#glow-blue)'));
+        .attr('r', baseR).attr('stroke', stroke).attr('stroke-width', n.isContext || n.isHub ? 2.5 : 1.5)
+        .attr('filter', n.visibility === 'shared' ? 'url(#glow-emerald)' : (
+          () => {
+             const uid = n.user_id;
+             const paletteIndex = Array.from(new Set(nodes.map(node => node.user_id))).indexOf(uid);
+             const glowNames = ['blue','purple','orange','green','white','emerald'];
+             return \`url(#glow-\${glowNames[paletteIndex % glowNames.length]})\`;
+          }
+        )());
       n._isNew = false; n._shouldSpike = false;
     }
   });
