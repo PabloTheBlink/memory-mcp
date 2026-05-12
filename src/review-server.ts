@@ -194,19 +194,29 @@ async function buildGraphData() {
 function renderStyles(): string {
   return `
   * { margin: 0; padding: 0; box-sizing: border-box; }
-  body { background: #060a12; overflow: hidden; font-family: 'Inter', system-ui, sans-serif; }
+  body { background: #020509; overflow: hidden; font-family: 'Inter', system-ui, sans-serif; }
   #svg-container { width: 100vw; height: 100vh; }
   svg { width: 100%; height: 100%; }
 
-  .node circle { cursor: pointer; transition: r 0.2s; }
-  .node text { pointer-events: none; font-size: 10px; fill: #ccc; opacity: 0; transition: opacity 0.2s; font-weight: 300; }
+  .node { cursor: pointer; }
+  .node text { pointer-events: none; font-size: 10px; fill: #ccc; opacity: 0; transition: opacity 0.3s; font-weight: 300; }
   .node.hovered text, .node.selected text { opacity: 1; font-weight: 500; }
-  .node.dimmed circle { opacity: 0.08; }
   .node.dimmed text { opacity: 0; }
 
-  .link { stroke-opacity: 0.25; transition: stroke-opacity 0.2s; }
-  .link.dimmed { stroke-opacity: 0.02; }
-  .link.highlighted { stroke-opacity: 0.8; stroke-width: 2px; }
+  .soma { transition: r 0.3s; }
+  .soma-aura { stroke-dasharray: 3,4; pointer-events: none; }
+  .node.dimmed .soma { opacity: 0.06; }
+  .node.dimmed .soma-aura { opacity: 0; }
+
+  .dendrite { fill: none; stroke-linecap: round; transition: stroke-opacity 0.3s; }
+  .node.dimmed .dendrite { stroke-opacity: 0.02 !important; }
+  .node.hovered .dendrite, .node.selected .dendrite { stroke-opacity: 0.6 !important; }
+
+  .link { stroke-opacity: 0.12; transition: stroke-opacity 0.3s; }
+  .link.dimmed { stroke-opacity: 0.01; }
+  .link.highlighted { stroke-opacity: 0.55; }
+
+  .impulse { pointer-events: none; }
 
   #info-panel {
     position: fixed; top: 20px; right: 20px;
@@ -313,61 +323,172 @@ const W = window.innerWidth, H = window.innerHeight;
 const svg = d3.select('#graph').attr('viewBox', [0,0,W,H]);
 const container = svg.append('g');
 
-// --- Glow filters ---
+// --- SVG defs: glow filters + radial gradients ---
 const defs = svg.append('defs');
-['blue','purple','orange','green','white','emerald'].forEach(name => {
-  const f = defs.append('filter').attr('id', 'glow-'+name).attr('x','-50%').attr('y','-50%').attr('width','200%').attr('height','200%');
-  f.append('feGaussianBlur').attr('stdDeviation','4').attr('result','blur');
-  const merge = f.append('feMerge');
-  merge.append('feMergeNode').attr('in','blur');
-  merge.append('feMergeNode').attr('in','SourceGraphic');
+
+const GLOW_COLORS = { blue:'#38bdf8', purple:'#8b5cf6', orange:'#f97316', green:'#4ade80', white:'#ffffff', emerald:'#10b981', pink:'#ec4899', amber:'#f59e0b' };
+Object.entries(GLOW_COLORS).forEach(([name, color]) => {
+  // Soft outer glow
+  const f = defs.append('filter').attr('id','glow-'+name).attr('x','-80%').attr('y','-80%').attr('width','260%').attr('height','260%');
+  f.append('feGaussianBlur').attr('stdDeviation','5').attr('result','blur');
+  const fm = f.append('feMerge');
+  fm.append('feMergeNode').attr('in','blur');
+  fm.append('feMergeNode').attr('in','SourceGraphic');
+
+  // Tight impulse glow
+  const fi = defs.append('filter').attr('id','iglow-'+name).attr('x','-200%').attr('y','-200%').attr('width','500%').attr('height','500%');
+  fi.append('feGaussianBlur').attr('stdDeviation','2.5').attr('result','blur');
+  const fim = fi.append('feMerge');
+  fim.append('feMergeNode').attr('in','blur');
+  fim.append('feMergeNode').attr('in','SourceGraphic');
+
+  // Radial gradient for soma
+  const grad = defs.append('radialGradient').attr('id','grad-'+name).attr('cx','35%').attr('cy','35%').attr('r','65%');
+  grad.append('stop').attr('offset','0%').attr('stop-color','#ffffff').attr('stop-opacity','0.9');
+  grad.append('stop').attr('offset','40%').attr('stop-color',color).attr('stop-opacity','0.85');
+  grad.append('stop').attr('offset','100%').attr('stop-color',color).attr('stop-opacity','0.15');
 });
 
-const gLinks = container.append('g').attr('class', 'links');
-const gNodes = container.append('g').attr('class', 'nodes');
+const gLinks   = container.append('g').attr('class','links');
+const gImpulse = container.append('g').attr('class','impulses');
+const gNodes   = container.append('g').attr('class','nodes');
 
 let nodes = [], links = [], nodeById = new Map();
 let sim, link, node, selected = null;
-let userColor = {};
-let userCenters = {};
-const USER_PALETTES = [
-  ['#3b82f6', '#60a5fa', '#93c5fd'],
-  ['#ec4899', '#f472b6', '#fbcfe8'],
-  ['#f59e0b', '#fbbf24', '#fcd34d'],
-  ['#8b5cf6', '#a78bfa', '#c4b5fd'],
-  ['#06b6d4', '#22d3ee', '#67e8f9'],
-];
+let userColor = {}, userCenters = {};
+
+const USER_PALETTES = ['blue','pink','amber','purple','blue'];
+const PALETTE_HEX   = { blue:'#3b82f6', pink:'#ec4899', amber:'#f59e0b', purple:'#8b5cf6' };
+
+// Pause simulation and ambient firing when tab is hidden
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) sim?.stop(); else sim?.restart();
+});
 
 // --- Visual helpers ---
 
-function getNodeColor(n) {
-  if (n.visibility === 'shared') return '#10b981';
-  if (n.isContext) return '#8b5cf6';
-  if (n.isHub) return '#fbbf24';
-  return userColor[n.user_id] || '#94a3b8';
+function getNodeGradient(n) {
+  if (n.visibility === 'shared') return 'url(#grad-emerald)';
+  if (n.isContext)               return 'url(#grad-purple)';
+  if (n.isHub)                   return 'url(#grad-amber)';
+  const pal = userColor[n.user_id] || 'blue';
+  return \`url(#grad-\${pal})\`;
 }
 
-function getUserStroke(n) {
+function getNodeColor(n) {
   if (n.visibility === 'shared') return '#10b981';
-  return userColor[n.user_id] || '#94a3b8';
+  if (n.isContext)               return '#8b5cf6';
+  if (n.isHub)                   return '#f59e0b';
+  const pal = userColor[n.user_id] || 'blue';
+  return PALETTE_HEX[pal] || '#94a3b8';
+}
+
+function getUserStrokeColor(n) {
+  if (n.visibility === 'shared') return '#10b981';
+  const pal = userColor[n.user_id] || 'blue';
+  return PALETTE_HEX[pal] || '#94a3b8';
+}
+
+// Only apply expensive glow filter to special nodes — regular nodes use stroke only
+function glowFilter(n) {
+  if (n.visibility === 'shared') return 'url(#glow-emerald)';
+  if (n.isContext)               return 'url(#glow-purple)';
+  if (n.isHub)                   return 'url(#glow-amber)';
+  return null;
 }
 
 function nodeRadius(n) {
-  if (n.isContext) return 12 + n.access_count * 0.3;
-  if (n.isHub) return 14 + n.importance * 8;
-  return 4 + n.strength * 12 + Math.min(n.access_count, 15) * 0.2;
+  if (n.isContext) return 10 + n.access_count * 0.25;
+  if (n.isHub)     return 12 + n.importance * 7;
+  return 3.5 + n.strength * 10 + Math.min(n.access_count, 15) * 0.18;
 }
 
 function linkColor(type) {
-  return { abstraction:'#fbbf24', causal:'#f97316', semantic:'#38bdf8', temporal:'#4ade80', episodic:'#c084fc' }[type] ?? '#444';
+  return { abstraction:'#f59e0b', causal:'#f97316', semantic:'#38bdf8', temporal:'#4ade80', episodic:'#c084fc' }[type] ?? '#334';
 }
 
-function glowFilter(n) {
-  if (n.visibility === 'shared') return 'url(#glow-emerald)';
-  const uid = n.user_id;
-  const paletteIndex = Array.from(new Set(nodes.map(x => x.user_id))).indexOf(uid);
-  const glowNames = ['blue','purple','orange','green','white','emerald'];
-  return \`url(#glow-\${glowNames[paletteIndex % glowNames.length]})\`;
+function linkGlowFilter(type) {
+  return { abstraction:'iglow-amber', causal:'iglow-orange', semantic:'iglow-blue', temporal:'iglow-green', episodic:'iglow-purple' }[type] ?? 'iglow-white';
+}
+
+// --- Impulse system ---
+
+function fireImpulse(x1, y1, x2, y2, color, duration) {
+  const dot = gImpulse.append('circle')
+    .attr('class','impulse')
+    .attr('r', 2.5)
+    .attr('cx', x1).attr('cy', y1)
+    .attr('fill', '#fff')
+    .attr('filter', \`url(#\${color})\`)
+    .attr('opacity', 1);
+  dot.transition().duration(duration).ease(d3.easeLinear)
+    .attrTween('cx', () => t => x1 + (x2 - x1) * t)
+    .attrTween('cy', () => t => y1 + (y2 - y1) * t)
+    .attr('opacity', 0)
+    .on('end', () => dot.remove());
+}
+
+function fireImpulsesFrom(d, burstCount = 1) {
+  links.forEach(l => {
+    const sid = l.source.id ?? l.source;
+    const tid = l.target.id ?? l.target;
+    if (sid !== d.id && tid !== d.id) return;
+    const src = nodeById.get(sid);
+    const tgt = nodeById.get(tid);
+    if (!src || !tgt) return;
+    const outgoing = sid === d.id;
+    const [x1, y1, x2, y2] = outgoing
+      ? [src.x, src.y, tgt.x, tgt.y]
+      : [tgt.x, tgt.y, src.x, src.y];
+    const filter = linkGlowFilter(l.type);
+    const count = Math.max(1, Math.min(burstCount, 4));
+    for (let i = 0; i < count; i++) {
+      const delay = i * 120 + Math.random() * 60;
+      const dur   = 450 + Math.random() * 250;
+      setTimeout(() => fireImpulse(x1, y1, x2, y2, filter, dur), delay);
+    }
+  });
+}
+
+// Ambient background firing — one impulse at a time, paused when tab hidden
+function startAmbientFiring() {
+  // Pre-build adjacency list for O(1) lookup instead of filter() each tick
+  let adjList = new Map();
+  function rebuildAdj() {
+    adjList = new Map();
+    links.forEach(l => {
+      const sid = l.source.id ?? l.source;
+      if (!adjList.has(sid)) adjList.set(sid, []);
+      adjList.get(sid).push(l);
+    });
+  }
+
+  function tick() {
+    if (!document.hidden && nodes.length > 0) {
+      if (adjList.size === 0) rebuildAdj();
+      // Pick a random node that has outgoing links
+      const candidates = nodes.filter(n => adjList.has(n.id));
+      if (candidates.length) {
+        const n = candidates[Math.floor(Math.random() * candidates.length)];
+        const ls = adjList.get(n.id);
+        const l  = ls[Math.floor(Math.random() * ls.length)];
+        const src = nodeById.get(l.source.id ?? l.source);
+        const tgt = nodeById.get(l.target.id ?? l.target);
+        if (src && tgt) fireImpulse(src.x, src.y, tgt.x, tgt.y, linkGlowFilter(l.type), 800 + Math.random() * 500);
+      }
+    }
+    setTimeout(tick, 1200 + Math.random() * 2000);
+  }
+
+  // Rebuild adjacency when links change
+  const _reconcileLinks = reconcileLinks;
+  reconcileLinks = (newLinks, oldLinks) => {
+    const result = _reconcileLinks(newLinks, oldLinks);
+    adjList.clear();
+    return result;
+  };
+
+  tick();
 }
 
 // --- Force simulation ---
@@ -376,20 +497,20 @@ sim = d3.forceSimulation()
   .force('link', d3.forceLink().id(d => d.id).distance(d => {
     const s = nodeById.get(d.source.id ?? d.source);
     const t = nodeById.get(d.target.id ?? d.target);
-    if (s?.visibility === 'shared' || t?.visibility === 'shared') return 100;
-    return (s?.user_id === t?.user_id) ? 60 : 180;
+    if (s?.visibility === 'shared' || t?.visibility === 'shared') return 110;
+    return (s?.user_id === t?.user_id) ? 70 : 200;
   }))
-  .force('charge', d3.forceManyBody().strength(d => (d.isContext || d.isHub) ? -500 : -100))
+  .force('charge', d3.forceManyBody().strength(d => (d.isContext || d.isHub) ? -600 : -120))
   .force('center', d3.forceCenter(W/2, H/2))
   .force('x', d3.forceX(d => {
     if (d.visibility === 'shared' || !d.user_id) return W/2;
     return userCenters[d.user_id]?.x ?? W/2;
-  }).strength(0.15))
+  }).strength(0.12))
   .force('y', d3.forceY(d => {
     if (d.visibility === 'shared' || !d.user_id) return H/2;
     return userCenters[d.user_id]?.y ?? H/2;
   }).strength(0.05))
-  .force('collide', d3.forceCollide().radius(d => nodeRadius(d) + 10));
+  .force('collide', d3.forceCollide().radius(d => nodeRadius(d) + 18));
 
 svg.call(d3.zoom().scaleExtent([0.05, 5]).on('zoom', e => container.attr('transform', e.transform)));
 
@@ -403,11 +524,12 @@ function highlight(d) {
     if (sid === d.id) connectedIds.add(tid);
     if (tid === d.id) connectedIds.add(sid);
   });
-  node.classed('dimmed', n => !connectedIds.has(n.id));
-  node.classed('hovered', n => n.id === d.id);
-  link.classed('dimmed', l => (l.source.id??l.source)!==d.id && (l.target.id??l.target)!==d.id);
+  node.classed('dimmed',      n => !connectedIds.has(n.id));
+  node.classed('hovered',     n => n.id === d.id);
+  link.classed('dimmed',      l => (l.source.id??l.source)!==d.id && (l.target.id??l.target)!==d.id);
   link.classed('highlighted', l => (l.source.id??l.source)===d.id || (l.target.id??l.target)===d.id);
   showInfoPanel(d);
+  fireImpulsesFrom(d, 2);
 }
 
 function clearHighlight() {
@@ -420,41 +542,35 @@ function clearHighlight() {
 function showInfoPanel(d) {
   document.getElementById('info-panel').style.display = 'block';
   document.getElementById('info-label').textContent = d.isContext ? d.contextName : (d.isHub ? d.label.replace('concept:','') : d.label);
-  document.getElementById('info-owner').textContent = d.user_id ? d.user_id.slice(0,8) + '...' : 'System';
-  document.getElementById('info-strength').textContent = d.strength.toFixed(3);
+  document.getElementById('info-owner').textContent  = d.user_id ? d.user_id.slice(0,8)+'...' : 'System';
+  document.getElementById('info-strength').textContent   = d.strength.toFixed(3);
   document.getElementById('info-importance').textContent = (d.importance || 0.5).toFixed(3);
-  document.getElementById('info-access').textContent = d.access_count;
-  document.getElementById('info-last').textContent = new Date(d.last_accessed_at).toLocaleDateString();
-  document.getElementById('info-contexts').innerHTML = d.contexts.map(c => '<span class="ctx-tag">' + c + '</span>').join('') || '<span style="color:#444">none</span>';
-  document.getElementById('info-visibility').innerHTML = \`<span class="visibility-tag vis-\${d.visibility}">\${d.visibility}</span>\`;
+  document.getElementById('info-access').textContent     = d.access_count;
+  document.getElementById('info-last').textContent       = new Date(d.last_accessed_at).toLocaleDateString();
+  document.getElementById('info-contexts').innerHTML     = d.contexts.map(c => '<span class="ctx-tag">'+c+'</span>').join('') || '<span style="color:#444">none</span>';
+  document.getElementById('info-visibility').innerHTML   = \`<span class="visibility-tag vis-\${d.visibility}">\${d.visibility}</span>\`;
 }
 
 // --- User registration ---
 
-function registerUser(uid, index, totalUsers) {
-  userColor[uid] = USER_PALETTES[index % USER_PALETTES.length][0];
-  const angle = (index / totalUsers) * Math.PI * 2;
-  userCenters[uid] = {
-    x: W/2 + Math.cos(angle) * W * 0.3,
-    y: H/2 + Math.sin(angle) * H * 0.15,
-  };
-}
-
 function assignUserCenters(userIds) {
   userIds.forEach((uid, i) => {
     if (userColor[uid]) return;
-    registerUser(uid, i, userIds.length);
+    userColor[uid] = USER_PALETTES[i % USER_PALETTES.length];
+    const angle = (i / userIds.length) * Math.PI * 2;
+    userCenters[uid] = { x: W/2 + Math.cos(angle) * W * 0.3, y: H/2 + Math.sin(angle) * H * 0.15 };
     if (userIds.length === 2) {
-      userCenters[userIds[0]] = { x: W * 0.2, y: H/2 };
-      userCenters[userIds[1]] = { x: W * 0.8, y: H/2 };
+      userCenters[userIds[0]] = { x: W * 0.22, y: H/2 };
+      userCenters[userIds[1]] = { x: W * 0.78, y: H/2 };
       document.getElementById('user-a-label').textContent = 'BRAIN ' + userIds[0].slice(-4);
       document.getElementById('user-b-label').textContent = 'BRAIN ' + userIds[1].slice(-4);
     } else {
       document.getElementById('user-a-label').style.display = 'none';
       document.getElementById('user-b-label').style.display = 'none';
     }
+    const hex = PALETTE_HEX[userColor[uid]] || '#94a3b8';
     d3.select('#legend-users').append('div').attr('class','row').html(
-      \`<div class="swatch" style="background:\${userColor[uid]}"></div><span>User \${uid.slice(0,6)}</span>\`
+      \`<div class="swatch" style="background:\${hex}"></div><span>User \${uid.slice(0,6)}</span>\`
     );
   });
 }
@@ -471,8 +587,8 @@ function reconcileNodes(newNodes, oldNodeById) {
       nodeById.set(nn.id, existing);
       return existing;
     }
-    nn.x = W/2 + (Math.random()-0.5)*200;
-    nn.y = H/2 + (Math.random()-0.5)*200;
+    nn.x = W/2 + (Math.random()-0.5)*220;
+    nn.y = H/2 + (Math.random()-0.5)*220;
     nn._isNew = true;
     nodeById.set(nn.id, nn);
     return nn;
@@ -480,19 +596,54 @@ function reconcileNodes(newNodes, oldNodeById) {
 }
 
 function reconcileLinks(newLinks, oldLinks) {
+  // O(n) via Map instead of O(n²) via find()
+  const oldMap = new Map(oldLinks.map(l => [(l.source.id||l.source)+'-'+(l.target.id||l.target), l]));
   return newLinks.map(nl => {
-    const existing = oldLinks.find(l => (l.source.id || l.source) === nl.source && (l.target.id || l.target) === nl.target);
+    const existing = oldMap.get(\`\${nl.source}-\${nl.target}\`);
     return existing ? Object.assign(existing, nl) : nl;
+  });
+}
+
+// --- Dendrite generation (called once on enter) ---
+
+function addDendrites(g) {
+  g.each(function(d) {
+    const sel = d3.select(this).append('g').attr('class','dendrites');
+    const r = nodeRadius(d);
+    const count = d.isContext ? 9 : d.isHub ? 7 : 4 + Math.round(d.strength * 3);
+    const color = getUserStrokeColor(d);
+    for (let i = 0; i < count; i++) {
+      const angle  = (i / count) * Math.PI * 2 + (Math.random() - 0.5) * 0.5;
+      const mainLen = r * (1.6 + Math.random() * 1.4);
+      const x2 = Math.cos(angle) * mainLen;
+      const y2 = Math.sin(angle) * mainLen;
+      // Main process (axon or dendrite)
+      sel.append('line').attr('class','dendrite')
+        .attr('x1', Math.cos(angle) * r * 0.9).attr('y1', Math.sin(angle) * r * 0.9)
+        .attr('x2', x2).attr('y2', y2)
+        .attr('stroke', color).attr('stroke-width', 0.7).attr('stroke-opacity', 0.28);
+      // Terminal branches
+      const branches = 1 + Math.floor(Math.random() * 2);
+      for (let b = 0; b < branches; b++) {
+        const ba  = angle + (Math.random() - 0.5) * 1.4;
+        const bx  = x2 + Math.cos(ba) * mainLen * (0.25 + Math.random() * 0.25);
+        const by  = y2 + Math.sin(ba) * mainLen * (0.25 + Math.random() * 0.25);
+        sel.append('line').attr('class','dendrite')
+          .attr('x1', x2).attr('y1', y2)
+          .attr('x2', bx).attr('y2', by)
+          .attr('stroke', color).attr('stroke-width', 0.35).attr('stroke-opacity', 0.18);
+      }
+    }
   });
 }
 
 // --- DOM rendering ---
 
 function renderLinks() {
-  link = gLinks.selectAll('.link').data(links, d => \`\${d.source.id || d.source}-\${d.target.id || d.target}\`)
+  link = gLinks.selectAll('.link').data(links, d => \`\${d.source.id||d.source}-\${d.target.id||d.target}\`)
     .join('line').attr('class','link')
     .attr('stroke', d => linkColor(d.type))
-    .attr('stroke-width', d => Math.max(0.3, d.weight * 2.5));
+    .attr('stroke-width', d => Math.max(0.4, d.weight * 1.8));
 }
 
 function renderNodes() {
@@ -500,33 +651,42 @@ function renderNodes() {
     .join(
       enter => {
         const g = enter.append('g').attr('class','node').attr('id', d => \`node-\${d.id}\`);
-        g.append('circle');
+        addDendrites(g);
+        g.append('circle').attr('class','soma-aura');
+        g.append('circle').attr('class','soma');
         g.append('text');
         return g;
       },
       update => update,
-      exit => exit.transition().duration(500).style('opacity', 0).remove()
+      exit => exit.transition().duration(500).style('opacity',0).remove()
     )
     .call(d3.drag()
       .on('start', (e,d) => { if(!e.active) sim.alphaTarget(0.2).restart(); d.fx=d.x; d.fy=d.y; })
       .on('drag',  (e,d) => { d.fx=e.x; d.fy=e.y; })
       .on('end',   (e,d) => { if(!e.active) sim.alphaTarget(0); d.fx=null; d.fy=null; }));
 
-  node.select('circle')
-    .attr('r', d => nodeRadius(d))
-    .attr('fill', d => getNodeColor(d) + '22')
-    .attr('stroke', d => getUserStroke(d))
-    .attr('stroke-width', d => d.isContext || d.isHub ? 2.5 : 1.5)
+  // Soma (cell body) — solid gradient sphere
+  node.select('.soma')
+    .attr('r',      d => nodeRadius(d) * 0.55)
+    .attr('fill',   d => getNodeGradient(d))
     .attr('filter', d => glowFilter(d));
 
+  // Soma aura — thin dashed ring
+  node.select('.soma-aura')
+    .attr('r',            d => nodeRadius(d))
+    .attr('fill',         'none')
+    .attr('stroke',       d => getUserStrokeColor(d))
+    .attr('stroke-width', 0.6)
+    .attr('stroke-opacity', 0.2);
+
   node.select('text')
-    .attr('dy', d => -(nodeRadius(d) + 5))
+    .attr('dy', d => -(nodeRadius(d) + 8))
     .attr('text-anchor','middle')
     .text(d => d.isContext ? d.contextName : d.label);
 
   node.on('mouseenter', (e,d) => { if (!selected) highlight(d); })
-      .on('mouseleave', () => { if (!selected) clearHighlight(); })
-      .on('click', (e,d) => {
+      .on('mouseleave', ()    => { if (!selected) clearHighlight(); })
+      .on('click',      (e,d) => {
         e.stopPropagation();
         if (selected === d.id) { clearHighlight(); return; }
         selected = d.id;
@@ -538,16 +698,19 @@ function renderNodes() {
 function animateNewNodes() {
   nodes.forEach(n => {
     if (!n._isNew && !n._shouldSpike) return;
-    const el = gNodes.select(\`#node-\${n.id}\`).select('circle');
-    if (el.empty()) return;
-    const baseR = nodeRadius(n);
-    const stroke = getUserStroke(n);
-    el.interrupt()
-      .attr('r', baseR * 3)
-      .attr('stroke', '#ffffff').attr('stroke-width', 6).attr('filter', 'url(#glow-white)')
-      .transition().duration(n._isNew ? 1000 : 600).ease(d3.easeQuadOut)
-      .attr('r', baseR).attr('stroke', stroke).attr('stroke-width', n.isContext || n.isHub ? 2.5 : 1.5)
+    const soma = gNodes.select(\`#node-\${n.id}\`).select('.soma');
+    if (soma.empty()) return;
+    const baseR  = nodeRadius(n) * 0.55;
+    const isNew  = n._isNew;
+    soma.interrupt()
+      .attr('r', baseR * 4)
+      .attr('fill', '#ffffff')
+      .attr('filter', 'url(#glow-white)')
+      .transition().duration(isNew ? 900 : 500).ease(d3.easeQuadOut)
+      .attr('r',      baseR)
+      .attr('fill',   getNodeGradient(n))
       .attr('filter', glowFilter(n));
+    fireImpulsesFrom(n, isNew ? 3 : 2);
     n._isNew = false;
     n._shouldSpike = false;
   });
@@ -587,13 +750,14 @@ sim.on('tick', () => {
 svg.on('click', clearHighlight);
 document.getElementById('search-input').addEventListener('input', e => {
   const q = e.target.value.toLowerCase().trim();
-  if (!q) { node.classed('dimmed', false); link.classed('dimmed', false); return; }
+  if (!q) { node.classed('dimmed',false); link.classed('dimmed',false); return; }
   node.classed('dimmed', n => !n.label.toLowerCase().includes(q));
   link.classed('dimmed', true);
 });
 
 update();
-setInterval(update, 2000);`;
+setInterval(update, 2000);
+startAmbientFiring();`;
 }
 
 function renderBrain(): string {
