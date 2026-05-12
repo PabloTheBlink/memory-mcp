@@ -148,10 +148,15 @@ export async function runMaintenance(force = false): Promise<MaintenanceReport> 
 
   // ── Step 3: Auto-merge near-duplicates (Language Agnostic) ──────────────
   const nodesForMerge = (await getAllNodes()).filter(n => !n.label.startsWith("[ctx:") && !n.label.startsWith("rule:") && !n.label.startsWith("preference:"));
+  const deletedIds = new Set<string>();
 
   for (let i = 0; i < nodesForMerge.length; i++) {
+    const a = nodesForMerge[i];
+    if (deletedIds.has(a.id)) continue;
+
     for (let j = i + 1; j < nodesForMerge.length; j++) {
-      const a = nodesForMerge[i], b = nodesForMerge[j];
+      const b = nodesForMerge[j];
+      if (deletedIds.has(b.id)) continue;
       
       // Only merge nodes from the same user
       if (a.user_id !== b.user_id) continue;
@@ -180,31 +185,63 @@ export async function runMaintenance(force = false): Promise<MaintenanceReport> 
       
       await rewireEdges(del.id, keep.id);
       await deleteNode(del.id);
+      deletedIds.add(del.id);
 
       report.autoMerged++;
       if (report.merges.length < 10) {
         report.merges.push({ kept: keep.label, deleted: del.label, similarity: Math.round(embSim * 100) / 100 } as any);
       }
 
-      nodesForMerge.splice(j, 1);
-      j--;
+      if (del === a) break; // Current 'a' is deleted, move to next 'i'
     }
   }
 
-  // ── Step 4: Orphan pruning ──────────────────────────────────────────────
-  const now = Date.now();
-  const afterMerge = await getAllNodes();
-  const allEdges = await getAllEdges();
-  const connectedIds = new Set(allEdges.flatMap(e => [e.from_id, e.to_id]));
+  // ── Step 4: Islands Auto-Linking (Pre-Pruning) ───────────────────────────
+  // Identify nodes with 0 edges and try to link them.
+  const ISLAND_LINK_THRESHOLD = 0.65; 
+  const nodesAfterMerge = await getAllNodes();
+  const allEdgesBeforePrune = await getAllEdges();
+  const connectedIds = new Set(allEdgesBeforePrune.flatMap(e => [e.from_id, e.to_id]));
+  
+  for (const node of nodesAfterMerge) {
+    if (connectedIds.has(node.id)) continue;
+    if (node.label.startsWith("[ctx:") || node.label.startsWith("curiosity:") || !node.embedding) continue;
 
-  for (const n of afterMerge) {
+    let bestMatch = null;
+    let highestSim = 0;
+
+    for (const target of nodesAfterMerge) {
+      if (target.id === node.id || !target.embedding) continue;
+      
+      const sim = cosineSimilarity(node.embedding, target.embedding);
+      if (sim > highestSim) {
+        highestSim = sim;
+        bestMatch = target;
+      }
+    }
+
+    if (bestMatch && highestSim >= ISLAND_LINK_THRESHOLD) {
+      await upsertEdge(node.id, bestMatch.id, "semantic", 0.4, node.user_id);
+      connectedIds.add(node.id);
+      connectedIds.add(bestMatch.id);
+      report.islandsLinked++;
+    }
+  }
+
+  // ── Step 5: Strict Orphan Pruning ─────────────────────────────────────────
+  const now = Date.now();
+  // Now prune anything that is still not connected.
+  for (const n of nodesAfterMerge) {
     if (connectedIds.has(n.id)) continue;
-    // Don't prune important or strong nodes, even if isolated. Protect rules.
-    if (n.importance > 0.7 || n.strength > 0.4 || n.label.startsWith("rule:") || n.label.startsWith("preference:")) continue;
     
-    if (n.strength > ORPHAN_MAX_STRENGTH) continue;
-    const ageDays = (now - n.last_accessed_at) / (1000 * 60 * 60 * 24);
-    if (ageDays < ORPHAN_MIN_AGE_DAYS) continue;
+    // Protect critical system nodes
+    if (n.label.startsWith("rule:") || n.label.startsWith("preference:") || n.label.startsWith("[ctx:")) continue;
+    
+    // If it's very important or very strong, maybe keep it? 
+    // The user was quite explicit: "if they have no relation, eliminate them".
+    // We'll keep very high importance nodes (0.9+) just in case, but prune everything else.
+    if (n.importance >= 0.9) continue;
+
     await deleteNode(n.id);
     report.orphansPruned++;
   }
@@ -329,47 +366,7 @@ export async function runMaintenance(force = false): Promise<MaintenanceReport> 
     }
   }
 
-  // ── Step 8.5: Islands Auto-Linking ──────────────────────────────────────────
-  // Identify nodes with 0 or 1 edges and force-link them to the most similar node
-  const ISLAND_LINK_THRESHOLD = 0.65; // Lower threshold to ensure islands get attached
-  const nodesForIslands = (await getAllNodes()).filter(n => n.embedding !== null && !n.label.startsWith("[ctx:") && !n.label.startsWith("curiosity:"));
-  
-  // Re-build adjacency for current state
-  const currentEdges = await getAllEdges();
-  const currentAdjacency = new Map<string, string[]>();
-  for (const e of currentEdges) {
-    if (!currentAdjacency.has(e.from_id)) currentAdjacency.set(e.from_id, []);
-    if (!currentAdjacency.has(e.to_id))   currentAdjacency.set(e.to_id,   []);
-    currentAdjacency.get(e.from_id)!.push(e.to_id);
-    currentAdjacency.get(e.to_id)!.push(e.from_id);
-  }
-
-  for (const node of nodesForIslands) {
-    const neighbors = currentAdjacency.get(node.id) ?? [];
-    if (neighbors.length <= 1) {
-      let bestMatch = null;
-      let highestSim = 0;
-
-      for (const target of nodesForIslands) {
-        if (target.id === node.id) continue;
-        if (await hasEdge(node.id, target.id)) continue;
-        
-        const sim = cosineSimilarity(node.embedding!, target.embedding!);
-        if (sim > highestSim) {
-          highestSim = sim;
-          bestMatch = target;
-        }
-      }
-
-      if (bestMatch && highestSim >= ISLAND_LINK_THRESHOLD) {
-        await upsertEdge(node.id, bestMatch.id, "semantic", 0.4, node.user_id);
-        report.islandsLinked++;
-        if (report.newLinks.length < 10) {
-          report.newLinks.push({ a: node.label, b: bestMatch.label, similarity: Math.round(highestSim * 100) / 100 });
-        }
-      }
-    }
-  }
+  // (Step 8.5 removed as it was integrated into Step 4/5)
 
   // ── Step 9: Importance Re-calibration (Long-term utility) ────────────────
   // Heuristic: If a node has high access count and was used across multiple days,
