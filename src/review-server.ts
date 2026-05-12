@@ -175,51 +175,71 @@ function renderBrain(): string {
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body { background: #060a12; overflow: hidden; font-family: 'Inter', system-ui, sans-serif; }
-  #svg-container { width: 100vw; height: 100vh; }
+  #svg-container { 
+    width: 100vw; height: 100vh; 
+    background: radial-gradient(circle at center, #0a101f 0%, #05080f 100%);
+  }
   svg { width: 100%; height: 100%; }
 
-  .node circle { cursor: pointer; transition: r 0.2s; }
+  /* Background grid for depth */
+  .grid { stroke: rgba(56, 189, 248, 0.03); stroke-width: 1px; pointer-events: none; }
+
+  .node circle, .node path { cursor: pointer; transition: r 0.2s, stroke-width 0.2s; }
   .node text { pointer-events: none; font-size: 10px; fill: #ccc; opacity: 0; transition: opacity 0.2s; font-weight: 300; }
   .node.hovered text, .node.selected text { opacity: 1; font-weight: 500; }
-  .node.dimmed circle { opacity: 0.08; }
+  .node.context text { opacity: 0.5; font-weight: 600; fill: #8b5cf6; }
+  .node.dimmed circle, .node.dimmed path { opacity: 0.08; }
   .node.dimmed text { opacity: 0; }
 
   .link { 
-    stroke-opacity: 0.35; 
-    stroke-dasharray: 2, 8;
-    animation: neural-flow 30s linear infinite;
-    transition: stroke-opacity 0.2s, stroke-width 0.2s;
-  }
-  @keyframes neural-flow {
-    from { stroke-dashoffset: 100; }
-    to { stroke-dashoffset: 0; }
+    stroke-opacity: 0.2; 
+    transition: stroke-opacity 0.3s, stroke-width 0.3s;
   }
   .link.dimmed { stroke-opacity: 0.05; }
   .link.highlighted { 
-    stroke-opacity: 0.95; 
-    stroke-width: 3px; 
-    stroke-dasharray: none; 
-    animation: none;
+    stroke-opacity: 0.8; 
+    stroke-width: 2px; 
   }
+
+  /* Neural flow particle effect */
+  .flow-particle {
+    fill: #fff;
+    filter: url(#glow-white);
+    offset-path: var(--path);
+    animation: flow-run 4s linear infinite;
+    opacity: 0;
+  }
+  @keyframes flow-run {
+    0% { offset-distance: 0%; opacity: 0; }
+    10% { opacity: 0.8; }
+    90% { opacity: 0.8; }
+    100% { offset-distance: 100%; opacity: 0; }
+  }
+
   .node.firing circle, .node.firing path {
     stroke-opacity: 1;
-    stroke-width: 3px;
+    stroke-width: 4px;
     stroke: #fff !important;
     filter: url(#glow-white);
+    animation: spike-pulse 0.6s ease-out;
+  }
+  @keyframes spike-pulse {
+    0% { transform: scale(1); }
+    50% { transform: scale(1.3); }
+    100% { transform: scale(1); }
   }
 
   /* Differential effect for contexts */
   .node.context path {
     stroke: #8b5cf6;
-    stroke-width: 2px;
-    animation: context-pulse 3s ease-in-out infinite;
+    stroke-width: 3px;
+    animation: context-pulse 4s ease-in-out infinite;
   }
   @keyframes context-pulse {
-    0% { stroke-width: 2px; stroke-opacity: 0.4; }
-    50% { stroke-width: 5px; stroke-opacity: 0.9; }
-    100% { stroke-width: 2px; stroke-opacity: 0.4; }
+    0% { stroke-width: 3px; stroke-opacity: 0.4; filter: blur(0px); }
+    50% { stroke-width: 8px; stroke-opacity: 1; filter: blur(2px); }
+    100% { stroke-width: 3px; stroke-opacity: 0.4; filter: blur(0px); }
   }
-  .node.context text { opacity: 0.5; font-weight: 600; fill: #8b5cf6; }
 
   #info-panel {
     position: fixed; top: 20px; right: 20px;
@@ -342,6 +362,16 @@ const W = window.innerWidth, H = window.innerHeight;
 const svg = d3.select('#graph').attr('viewBox', [0,0,W,H]);
 const container = svg.append('g');
 
+// Draw background grid
+const gridStep = 100;
+const gGrid = container.append('g').attr('class', 'grid');
+for (let x = -W*2; x <= W*2; x += gridStep) {
+  gGrid.append('line').attr('x1', x).attr('y1', -H*2).attr('x2', x).attr('y2', H*2);
+}
+for (let y = -H*2; y <= H*2; y += gridStep) {
+  gGrid.append('line').attr('x1', -W*2).attr('y1', y).attr('x2', W*2).attr('y2', y);
+}
+
 const defs = svg.append('defs');
 ['blue','purple','orange','green','white','emerald'].forEach(name => {
   const colors = { blue:'#38bdf8', purple:'#8b5cf6', orange:'#f97316', green:'#4ade80', white:'#ffffff', emerald:'#10b981' };
@@ -353,6 +383,7 @@ const defs = svg.append('defs');
 });
 
 const gLinks = container.append('g').attr('class', 'links');
+const gFlow = container.append('g').attr('class', 'flow');
 const gNodes = container.append('g').attr('class', 'nodes');
 
 let nodes = [], links = [], nodeById = new Map();
@@ -511,9 +542,22 @@ async function update() {
 
   link = gLinks.selectAll('.link').data(links, d => \`\${d.source.id || d.source}-\${d.target.id || d.target}\`)
     .join('line').attr('class','link')
+    .attr('id', d => \`link-\${d.source.id || d.source}-\${d.target.id || d.target}\`)
     .attr('stroke', d => linkColor(d.type))
-    .attr('stroke-width', d => d.type === 'abstraction' ? 4 : Math.max(1.5, d.weight * 4))
-    .attr('stroke-dasharray', d => d.type === 'abstraction' ? 'none' : '2, 8');
+    .attr('stroke-width', d => d.type === 'abstraction' ? 3 : Math.max(1, d.weight * 2.5));
+
+  // Update particles
+  const flowData = links.filter((_, i) => i % 4 === 0); // Only some links have active flow to save performance
+  const particles = gFlow.selectAll('.flow-particle').data(flowData, d => \`flow-\${d.source.id || d.source}-\${d.target.id || d.target}\`)
+    .join('circle').attr('class', 'flow-particle').attr('r', 1.5)
+    .style('--path', d => {
+        const s = nodeById.get(d.source.id || d.source);
+        const t = nodeById.get(d.target.id || d.target);
+        if (!s || !t) return '';
+        return \`path("M \${s.x},\${s.y} L \${t.x},\${t.y}")\`;
+    })
+    .style('animation-delay', () => \`-\${Math.random() * 4}s\`)
+    .style('animation-duration', () => \`\${2 + Math.random() * 4}s\`);
 
   node = gNodes.selectAll('.node').data(nodes, d => d.id)
     .join(
@@ -614,6 +658,13 @@ sim.on('tick', () => {
   link.attr('x1',d=>d.source.x).attr('y1',d=>d.source.y)
       .attr('x2',d=>d.target.x).attr('y2',d=>d.target.y);
   node.attr('transform', d => \`translate(\${d.x},\${d.y})\`);
+  
+  // Update particle paths during movement
+  gFlow.selectAll('.flow-particle').style('--path', d => {
+    const s = d.source;
+    const t = d.target;
+    return \`path("M \${s.x},\${s.y} L \${t.x},\${t.y}")\`;
+  });
 });
 
 svg.on('click', clearHighlight);
