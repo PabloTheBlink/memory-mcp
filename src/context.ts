@@ -69,20 +69,31 @@ export async function setActiveContext(context: string): Promise<void> {
 }
 
 export async function ensureContextNode(contextName: string): Promise<string> {
-  const label = contextLabel(contextName);
-  let node = await findOrCreateNode(label);
+  const parts = contextName.split(':');
+  let currentId = "";
+  let currentPath = "";
 
-  if (!node.embedding) {
-    // Embed a human-readable description, not the label syntax
-    const description = contextName.startsWith("project:")
-      ? `software project ${contextName.replace("project:", "")}`
-      : contextName;
-    const emb = await getEmbedding(description);
-    await updateNodeEmbedding(node.id, emb);
+  for (let i = 0; i < parts.length; i++) {
+    currentPath = currentPath ? `${currentPath}:${parts[i]}` : parts[i];
+    const label = contextLabel(currentPath);
+    let node = await findOrCreateNode(label, null, 0.8, null, getDeviceId(), "shared");
+
+    if (!node.embedding) {
+      const description = currentPath.replace(/:/g, " context, subclass of ");
+      const emb = await getEmbedding(description);
+      await updateNodeEmbedding(node.id, emb);
+    }
+
+    if (currentId) {
+      // Link child to parent via abstraction edge
+      await upsertEdge(node.id, currentId, "abstraction", 0.5, getDeviceId());
+    }
+
+    currentId = node.id;
+    await touchNode(node.id);
   }
 
-  await touchNode(node.id);
-  return node.id;
+  return currentId;
 }
 
 // Bind a memory node to the active context with a weak episodic edge.

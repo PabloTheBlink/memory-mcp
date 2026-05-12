@@ -162,6 +162,13 @@ export async function upsertEdge(
   
   const [a, b] = fromId < toId ? [fromId, toId] : [toId, fromId];
 
+  // Robustness check: ensure both nodes exist before creating an edge
+  const nodesExist = await db.queryAll("SELECT id FROM nodes WHERE id IN (?, ?)", [a, b]);
+  if (nodesExist.length < 2) {
+    process.stderr.write(`[GRAPH] Skipping edge creation: one or both nodes do not exist (${a}, ${b})\n`);
+    return { from_id: a, to_id: b, weight: 0.5, type: type as any, co_occurrences: 1, created_at: now, last_reinforced_at: now, user_id: userId };
+  }
+
   if (DB_TYPE === "mysql") {
     await db.run(`
       INSERT INTO edges (from_id, to_id, type, weight, created_at, last_reinforced_at, co_occurrences, user_id)
@@ -187,6 +194,13 @@ export async function upsertEdge(
 
 export async function rewireEdges(fromId: string, toId: string): Promise<void> {
   const db = await getDb();
+  // Ensure the target node exists
+  const targetExists = await db.queryGet("SELECT id FROM nodes WHERE id = ?", [toId]);
+  if (!targetExists) {
+    process.stderr.write(`[GRAPH] Cannot rewire edges: target node ${toId} does not exist\n`);
+    return;
+  }
+
   const edges = await db.queryAll("SELECT * FROM edges WHERE from_id = ? OR to_id = ?", [fromId, fromId]);
   const DB_TYPE = (process.env.DB_TYPE || "").trim() === "mysql" ? "mysql" : "sqlite";
 

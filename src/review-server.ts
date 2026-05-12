@@ -297,6 +297,8 @@ function renderBrain(): string {
   <h4 style="margin-top:12px">Node Types</h4>
   <div class="row"><div class="swatch" style="background:#8b5cf6"></div><span>Context hub</span></div>
   <div class="row"><div class="swatch" style="background:#fbbf24"></div><span>Conceptual Hub</span></div>
+  <div class="row"><div class="swatch" style="background:#ef4444"></div><span>Conflict</span></div>
+  <div class="row"><div class="swatch" style="background:#ec4899"></div><span>Curiosity Gap</span></div>
   
   <h4 style="margin-top:12px">Link Types</h4>
   <div class="row"><div class="line-swatch" style="background:#fbbf24"></div><span>abstraction</span></div>
@@ -344,6 +346,8 @@ const USER_PALETTES = [
 ];
 
 function getNodeColor(n) {
+  if (n.label.startsWith('conflict:')) return '#ef4444'; // Red for conflicts
+  if (n.label.startsWith('curiosity:')) return '#ec4899'; // Pink for curiosity
   if (n.visibility === 'shared') return '#10b981'; // Emerald for shared
   if (n.isContext) return '#8b5cf6';             // Purple for context
   if (n.isHub) return '#fbbf24';                 // Amber for hubs
@@ -582,9 +586,28 @@ sim.on('tick', () => {
 svg.on('click', clearHighlight);
 document.getElementById('search-input').addEventListener('input', e => {
   const q = e.target.value.toLowerCase().trim();
-  if (!q) { node.classed('dimmed', false); link.classed('dimmed', false); return; }
-  node.classed('dimmed', n => !n.label.toLowerCase().includes(q));
+  if (!q) { 
+    node.classed('dimmed', false); 
+    link.classed('dimmed', false); 
+    return; 
+  }
+  
+  let firstMatch = null;
+  node.classed('dimmed', n => {
+    const match = n.label.toLowerCase().includes(q);
+    if (match && !firstMatch) firstMatch = n;
+    return !match;
+  });
   link.classed('dimmed', true);
+
+  if (firstMatch) {
+    const transform = d3.zoomIdentity
+      .translate(W/2, H/2)
+      .scale(1.2)
+      .translate(-firstMatch.x, -firstMatch.y);
+    svg.transition().duration(750).call(zoom.transform, transform);
+    highlight(firstMatch);
+  }
 });
 
 update();

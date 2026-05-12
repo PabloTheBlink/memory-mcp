@@ -15,11 +15,26 @@ export async function spreadActivation(
   const activations = new Map<string, number>();
   const edgeSet = new Map<string, { from_id: string; to_id: string; weight: number; type: string }>();
 
-  // Pre-fetch active context neighbors for efficient inhibition
+  // Pre-fetch active context and its hierarchy (parents) for efficient focus
   const contextNeighbors = new Set<string>();
   if (activeContextNodeId) {
-    contextNeighbors.add(activeContextNodeId);
-    (await getNeighbors(activeContextNodeId)).forEach(n => contextNeighbors.add(n.node.id));
+    const queue = [activeContextNodeId];
+    const visited = new Set<string>();
+    while (queue.length > 0) {
+      const cid = queue.shift()!;
+      if (visited.has(cid)) continue;
+      visited.add(cid);
+      contextNeighbors.add(cid);
+      
+      const neighbors = await getNeighbors(cid);
+      for (const n of neighbors) {
+        contextNeighbors.add(n.node.id);
+        // If it's a parent (abstraction link where we are the child), add to queue to find grandparents
+        if (n.edge.type === "abstraction" && n.edge.to_id === cid) {
+           queue.push(n.node.id);
+        }
+      }
+    }
   }
 
   for (const { id, activation } of seeds) {
