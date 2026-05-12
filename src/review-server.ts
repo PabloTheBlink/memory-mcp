@@ -189,6 +189,11 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  if (req.method === "GET" && url === "/api/duplicates") {
+    json(res, await findDuplicates());
+    return;
+  }
+
   if (req.method === "POST") {
     const body = await readBody(req);
 

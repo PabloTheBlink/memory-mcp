@@ -17,9 +17,13 @@
 
   .node circle, .node path { cursor: pointer; transition: r 0.2s, stroke-width 0.2s; }
   .node text { pointer-events: none; font-size: 10px; fill: #ccc; opacity: 0; transition: opacity 0.2s; font-weight: 300; }
-  .node.hovered text, .node.selected text { opacity: 1; font-weight: 500; }
+  .node.hovered text, .node.selected text, .node.multiselected text { opacity: 1; font-weight: 500; }
   .node.context text { opacity: 0.5; font-weight: 600; fill: #8b5cf6; }
   .node.dimmed circle, .node.dimmed path { opacity: 0.08; }
+  .node.multiselected circle, .node.multiselected path { 
+    stroke: #38bdf8 !important; stroke-width: 4px; stroke-opacity: 1;
+    filter: url(#glow-blue);
+  }
   .node.dimmed text { opacity: 0; }
 
   .link { 
@@ -149,12 +153,90 @@
   }
 
   .user-label { position: fixed; font-size: 1.2rem; font-weight: 800; color: rgba(255,255,255,0.05); pointer-events: none; text-transform: uppercase; letter-spacing: 10px; }
+
+  /* Maintenance Panel */
+  #maintenance-panel {
+    position: fixed; top: 20px; left: 20px; bottom: 20px;
+    width: 320px; background: rgba(10,14,24,0.95);
+    border: 1px solid #1e2a3a; border-radius: 16px;
+    display: flex; flex-direction: column; overflow: hidden;
+    backdrop-filter: blur(20px); z-index: 1000;
+    transform: translateX(-340px); transition: transform 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+    box-shadow: 20px 0 50px rgba(0,0,0,0.5);
+  }
+  #maintenance-panel.open { transform: translateX(0); }
+  #maintenance-header { padding: 20px; border-bottom: 1px solid #1e2a3a; display: flex; justify-content: space-between; align-items: center; }
+  #maintenance-header h3 { color: #fff; font-size: 0.9rem; letter-spacing: 1px; text-transform: uppercase; }
+  #maintenance-content { flex: 1; overflow-y: auto; padding: 10px; }
+  .duplicate-card { 
+    background: rgba(30,42,58,0.4); border-radius: 12px; padding: 12px; margin-bottom: 10px;
+    border: 1px solid transparent; transition: all 0.2s; cursor: pointer;
+  }
+  .duplicate-card:hover { border-color: #38bdf8; background: rgba(30,42,58,0.6); }
+  .duplicate-card .sim { float: right; color: #10b981; font-weight: bold; font-size: 0.75rem; }
+  .duplicate-card .labels { font-size: 0.8rem; color: #ccc; margin-top: 5px; }
+  .duplicate-card .reason { font-size: 0.7rem; color: #666; margin-top: 5px; font-style: italic; }
+
+  #toggle-maintenance {
+    position: fixed; top: 20px; left: 20px;
+    width: 40px; height: 40px; border-radius: 10px;
+    background: #1e2a3a; color: #fff; border: 1px solid #2e3a4a;
+    display: flex; align-items: center; justify-content: center;
+    cursor: pointer; z-index: 1001; transition: all 0.2s;
+  }
+  #toggle-maintenance:hover { background: #38bdf8; border-color: #7dd3fc; }
+
+  .btn {
+    padding: 6px 12px; border-radius: 6px; font-size: 0.75rem; font-weight: 600;
+    cursor: pointer; transition: all 0.2s; border: none; outline: none;
+  }
+  .btn-primary { background: #38bdf8; color: #000; }
+  .btn-danger { background: #ef4444; color: #fff; }
+  .btn-ghost { background: transparent; color: #aaa; border: 1px solid #333; }
+  .btn:hover { filter: brightness(1.1); transform: translateY(-1px); }
+
+  #filter-bar {
+    position: fixed; top: 80px; left: 20px; display: flex; flex-direction: column; gap: 8px; z-index: 900;
+  }
+  .filter-btn {
+    width: 40px; height: 40px; border-radius: 50%; background: rgba(15,23,42,0.8);
+    border: 1px solid #1e2a3a; color: #64748b; display: flex; align-items: center; justify-content: center;
+    cursor: pointer; transition: all 0.3s;
+  }
+  .filter-btn.active { color: #fff; border-color: #38bdf8; box-shadow: 0 0 15px rgba(56, 189, 248, 0.4); }
+
+  #merge-ui {
+    display: flex; gap: 8px; margin-top: 12px; padding-top: 12px; border-top: 1px solid #1e2a3a;
+  }
 </style>
 </head>
 <body>
 <div id="svg-container"><svg id="graph"></svg></div>
 
-<div id="nav"><span class="title">NEURAL NETWORK • MULTI-USER</span></div>
+<div id="nav" style="left: 80px;">
+  <span class="title">NEURAL NETWORK • MULTI-USER</span>
+  <button class="btn btn-ghost" style="margin-left:12px; padding:4px 8px; font-size:0.65rem;" onclick="update()">Refresh Graph</button>
+</div>
+
+<button id="toggle-maintenance" title="Knowledge Maintenance">
+  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"></path></svg>
+</button>
+
+<div id="filter-bar">
+  <button class="filter-btn active" data-type="hub" title="Toggle Hubs">H</button>
+  <button class="filter-btn active" data-type="context" title="Toggle Contexts">C</button>
+  <button class="filter-btn active" data-type="shared" title="Toggle Shared">S</button>
+</div>
+
+<div id="maintenance-panel">
+  <div id="maintenance-header">
+    <h3>Maintenance</h3>
+    <button class="btn btn-ghost" onclick="toggleMaintenance()">Close</button>
+  </div>
+  <div id="maintenance-content">
+    <div style="padding: 20px; color: #444; text-align: center;">Scanning for duplicates...</div>
+  </div>
+</div>
 
 <div id="info-panel">
   <div style="display:flex; justify-content:space-between; align-items:start">
@@ -168,6 +250,10 @@
   <div class="row"><span class="key">Last seen</span><span class="val" id="info-last"></span></div>
   <div style="margin-top:8px; color:#555; font-size:0.72rem">Contexts / Types</div>
   <div id="info-contexts" style="margin-top:4px"></div>
+  <div id="merge-ui" style="display:none">
+    <button class="btn btn-primary" id="btn-merge-keep">Keep this</button>
+    <button class="btn btn-danger" id="btn-delete-node">Delete</button>
+  </div>
 </div>
 
 <div id="legend">
@@ -194,6 +280,8 @@
 <div id="shared-label" class="user-label" style="top:10%; left:50%; transform:translate(-50%,-50%)">SHARED NUCLEUS</div>
 
 <div id="search"><input id="search-input" placeholder="Search neurons…" /></div>
+
+<div id="error-log" style="position:fixed; bottom:10px; left:50%; transform:translateX(-50%); background:rgba(220,38,38,0.9); color:white; padding:8px 16px; border-radius:8px; font-size:0.75rem; z-index:9999; display:none; pointer-events:none;"></div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js"></script>
 <script>
@@ -236,8 +324,10 @@ const gNodes = container.append('g').attr('class', 'nodes');
 
 let nodes = [], links = [], nodeById = new Map();
 let sim, link, node, selected = null;
+let multiSelect = [];
 let userColor = {};
 let userCenters = {};
+let filters = { hub: true, context: true, shared: true };
 const USER_PALETTES = [
   ['#3b82f6', '#60a5fa', '#93c5fd'], // Blue
   ['#ec4899', '#f472b6', '#fbcfe8'], // Pink
@@ -272,6 +362,18 @@ function nodeRadius(n) {
 function linkColor(type) {
   return { abstraction:'#fbbf24', causal:'#f97316', semantic:'#38bdf8', temporal:'#4ade80', episodic:'#c084fc' }[type] ?? '#444';
 }
+
+function logError(msg) {
+  console.error(msg);
+  const el = document.getElementById('error-log');
+  if (el) {
+    el.textContent = msg;
+    el.style.display = 'block';
+    setTimeout(() => { el.style.display = 'none'; }, 5000);
+  }
+}
+
+window.onerror = (msg) => logError('Runtime Error: ' + msg);
 
 sim = d3.forceSimulation()
   .force('link', d3.forceLink().id(d => d.id).distance(d => {
@@ -326,10 +428,119 @@ function highlight(d) {
 }
 
 function clearHighlight() {
-  node.classed('dimmed hovered selected', false);
+  node.classed('dimmed hovered selected multiselected', false);
   link.classed('dimmed highlighted', false);
   document.getElementById('info-panel').style.display = 'none';
+  document.getElementById('merge-ui').style.display = 'none';
   selected = null;
+  multiSelect = [];
+}
+
+function toggleMaintenance() {
+  const panel = document.getElementById('maintenance-panel');
+  panel.classList.toggle('open');
+  if (panel.classList.contains('open')) refreshDuplicates();
+}
+
+async function refreshDuplicates() {
+  const content = document.getElementById('maintenance-content');
+  content.innerHTML = '<div style="padding:20px; color:#444; text-align:center">Scanning neural patterns...</div>';
+  try {
+    const dups = await fetch('/api/duplicates').then(r => r.json());
+    if (dups.length === 0) {
+      content.innerHTML = '<div style="padding:20px; color:#666; text-align:center">Brain is clean. No duplicates found.</div>';
+      return;
+    }
+    content.innerHTML = dups.map(d => `
+      <div class="duplicate-card" onclick="focusPair('${d.a.id}', '${d.b.id}')">
+        <span class="sim">${Math.round(d.similarity * 100)}%</span>
+        <div class="labels">
+          <div style="color:#fff">${d.a.label}</div>
+          <div style="color:#888">${d.b.label}</div>
+        </div>
+        <div class="reason">${d.reason}</div>
+      </div>
+    `).join('');
+  } catch (e) {
+    content.innerHTML = '<div style="padding:20px; color:#f44">Error scanning memory.</div>';
+  }
+}
+
+function focusPair(idA, idB) {
+  const nA = nodeById.get(idA);
+  const nB = nodeById.get(idB);
+  if (!nA || !nB) return;
+  
+  multiSelect = [idA, idB];
+  node.classed('multiselected', n => multiSelect.includes(n.id));
+  
+  const midX = (nA.x + nB.x) / 2;
+  const midY = (nA.y + nB.y) / 2;
+  const transform = d3.zoomIdentity.translate(W/2, H/2).scale(1.2).translate(-midX, -midY);
+  svg.transition().duration(750).call(zoom.transform, transform);
+}
+
+async function mergeNodes(keepId, deleteId) {
+  if (!confirm('Are you sure you want to merge these nodes? Edges will be rewired.')) return;
+  const res = await fetch('/merge', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ keep_id: keepId, delete_id: deleteId })
+  }).then(r => r.json());
+  
+  if (res.ok) {
+    clearHighlight();
+    update();
+    refreshDuplicates();
+  } else {
+    alert('Merge failed: ' + res.error);
+  }
+}
+
+async function deleteNode(id) {
+  if (!confirm('Delete this neuron permanently?')) return;
+  const res = await fetch('/delete-node', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id })
+  }).then(r => r.json());
+  
+  if (res.ok) {
+    clearHighlight();
+    update();
+  }
+}
+
+document.getElementById('toggle-maintenance').onclick = toggleMaintenance;
+
+document.querySelectorAll('.filter-btn').forEach(btn => {
+  btn.onclick = () => {
+    const type = btn.dataset.type;
+    filters[type] = !filters[type];
+    btn.classList.toggle('active', filters[type]);
+    updateVisibility();
+  };
+});
+
+function updateVisibility() {
+  if (!node || !link) return;
+  node.style('display', d => {
+    if (!filters.hub && d.isHub) return 'none';
+    if (!filters.context && d.isContext) return 'none';
+    if (!filters.shared && d.visibility === 'shared') return 'none';
+    return 'block';
+  });
+  link.style('display', l => {
+    const sId = l.source?.id || l.source;
+    const tId = l.target?.id || l.target;
+    const s = nodeById.get(sId);
+    const t = nodeById.get(tId);
+    if (!s || !t) return 'none';
+    if (!filters.hub && (s.isHub || t.isHub)) return 'none';
+    if (!filters.context && (s.isContext || t.isContext)) return 'none';
+    if (!filters.shared && (s.visibility === 'shared' || t.visibility === 'shared')) return 'none';
+    return 'block';
+  });
 }
 
 async function update() {
@@ -352,11 +563,15 @@ async function update() {
       if (userIds.length === 2) {
         userCenters[userIds[0]] = { x: W * 0.2, y: H/2 };
         userCenters[userIds[1]] = { x: W * 0.8, y: H/2 };
-        document.getElementById('user-a-label').textContent = 'BRAIN ' + userIds[0].slice(-4);
-        document.getElementById('user-b-label').textContent = 'BRAIN ' + userIds[1].slice(-4);
+        const labelA = document.getElementById('user-a-label');
+        const labelB = document.getElementById('user-b-label');
+        if (labelA) labelA.textContent = 'BRAIN ' + String(userIds[0]).slice(-4);
+        if (labelB) labelB.textContent = 'BRAIN ' + String(userIds[1]).slice(-4);
       } else {
-        document.getElementById('user-a-label').style.display = 'none';
-        document.getElementById('user-b-label').style.display = 'none';
+        const labelA = document.getElementById('user-a-label');
+        const labelB = document.getElementById('user-b-label');
+        if (labelA) labelA.style.display = 'none';
+        if (labelB) labelB.style.display = 'none';
       }
 
       d3.select('#legend-users').append('div').attr('class','row').html(
@@ -428,6 +643,8 @@ async function update() {
       .on('drag',  (e,d) => { d.fx=e.x; d.fy=e.y; })
       .on('end',   (e,d) => { if(!e.active) sim.alphaTarget(0); d.fx=null; d.fy=null; }));
 
+  updateVisibility();
+
   node.filter(':not(.context)').select('circle')
     .attr('r', d => nodeRadius(d))
     .attr('fill', d => getNodeColor(d) + '44')
@@ -451,14 +668,36 @@ async function update() {
     .attr('text-anchor','middle')
     .text(d => d.isContext ? d.contextName : d.label);
 
-  node.on('mouseenter', (e,d) => { if (!selected) highlight(d); })
-      .on('mouseleave', () => { if (!selected) clearHighlight(); })
+  node.on('mouseenter', (e,d) => { if (!selected && multiSelect.length === 0) highlight(d); })
+      .on('mouseleave', () => { if (!selected && multiSelect.length === 0) clearHighlight(); })
       .on('click', (e,d) => {
         e.stopPropagation();
+        if (e.shiftKey) {
+            if (multiSelect.includes(d.id)) {
+                multiSelect = multiSelect.filter(id => id !== d.id);
+            } else {
+                multiSelect.push(d.id);
+            }
+            node.classed('multiselected', n => multiSelect.includes(n.id));
+            if (multiSelect.length === 2) {
+                // Show merge UI if 2 selected
+                document.getElementById('info-panel').style.display = 'block';
+                document.getElementById('info-label').textContent = 'Potential Merge';
+                document.getElementById('merge-ui').style.display = 'flex';
+                document.getElementById('btn-merge-keep').onclick = () => mergeNodes(multiSelect[0], multiSelect[1]);
+                document.getElementById('btn-delete-node').onclick = () => deleteNode(multiSelect[1]);
+            }
+            return;
+        }
+
         if (selected === d.id) { clearHighlight(); return; }
         selected = d.id;
         node.classed('selected', n => n.id === d.id);
         highlight(d);
+        document.getElementById('merge-ui').style.display = 'flex';
+        document.getElementById('btn-merge-keep').style.display = 'none';
+        document.getElementById('btn-delete-node').style.display = 'block';
+        document.getElementById('btn-delete-node').onclick = () => deleteNode(d.id);
       });
 
   nodes.forEach(n => {
@@ -498,7 +737,7 @@ async function update() {
 
   sim.nodes(nodes);
   sim.force('link').links(links);
-  sim.alpha(0.05).restart();
+  sim.alpha(0.1).restart();
 }
 
 sim.on('tick', () => {
