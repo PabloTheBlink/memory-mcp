@@ -71,6 +71,13 @@ class SqliteAdapter implements DBAdapter {
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL
       );
+      
+      CREATE TABLE IF NOT EXISTS logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        event TEXT NOT NULL,
+        timestamp INTEGER NOT NULL,
+        user_id TEXT
+      );
 
       CREATE INDEX IF NOT EXISTS idx_edges_from ON edges(from_id);
       CREATE INDEX IF NOT EXISTS idx_edges_to ON edges(to_id);
@@ -180,6 +187,15 @@ class MysqlAdapter implements DBAdapter {
         CREATE TABLE IF NOT EXISTS meta (
           \`key\` VARCHAR(255) PRIMARY KEY,
           value LONGTEXT NOT NULL
+        );
+      `);
+
+      await conn.query(`
+        CREATE TABLE IF NOT EXISTS logs (
+          id INT AUTO_INCREMENT PRIMARY KEY,
+          event TEXT NOT NULL,
+          timestamp BIGINT NOT NULL,
+          user_id VARCHAR(100)
         );
       `);
 

@@ -281,6 +281,17 @@
 
 <div id="search"><input id="search-input" placeholder="Search neurons…" /></div>
 
+<div id="stats-panel" style="position:fixed; top:20px; left:50%; transform:translateX(-50%); background:rgba(10,14,24,0.8); border:1px solid #1e2a3a; border-radius:30px; padding:6px 20px; backdrop-filter:blur(10px); display:flex; gap:20px; font-size:0.75rem; color:#888; z-index:100;">
+  <div>NODES: <span id="stat-nodes" style="color:#fff; font-weight:bold;">0</span></div>
+  <div>EDGES: <span id="stat-edges" style="color:#fff; font-weight:bold;">0</span></div>
+  <div>STATUS: <span style="color:#10b981; font-weight:bold;">ACTIVE</span></div>
+</div>
+
+<div id="logs-panel" style="position:fixed; bottom:20px; left:50%; transform:translateX(-50%); width:600px; height:120px; background:rgba(10,14,24,0.9); border:1px solid #1e2a3a; border-radius:12px; backdrop-filter:blur(15px); overflow:hidden; display:flex; flex-direction:column; z-index:100; box-shadow:0 -10px 40px rgba(0,0,0,0.5);">
+  <div style="padding:6px 12px; background:rgba(30,42,58,0.5); border-bottom:1px solid #1e2a3a; font-size:0.65rem; color:#666; letter-spacing:1px; text-transform:uppercase;">Activity Stream</div>
+  <div id="logs-content" style="flex:1; overflow-y:auto; padding:8px 12px; font-family:'JetBrains Mono', monospace; font-size:0.7rem; color:#aaa;"></div>
+</div>
+
 <div id="error-log" style="position:fixed; bottom:10px; left:50%; transform:translateX(-50%); background:rgba(220,38,38,0.9); color:white; padding:8px 16px; border-radius:8px; font-size:0.75rem; z-index:9999; display:none; pointer-events:none;"></div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js"></script>
@@ -781,8 +792,31 @@ document.getElementById('search-input').addEventListener('input', e => {
   }
 });
 
+async function updateLogs() {
+  try {
+    const logs = await fetch('/api/logs').then(r => r.json());
+    const content = document.getElementById('logs-content');
+    content.innerHTML = logs.map(l => {
+      const time = new Date(l.timestamp).toLocaleTimeString();
+      return `<div style="margin-bottom:2px;"><span style="color:#555;">[${time}]</span> <span style="color:#8cf;">${l.event}</span></div>`;
+    }).join('');
+  } catch (e) {}
+}
+
+async function updateStats() {
+  try {
+    const stats = await fetch('/api/stats').then(r => r.json());
+    document.getElementById('stat-nodes').textContent = stats.nodes;
+    document.getElementById('stat-edges').textContent = stats.edges;
+  } catch (e) {}
+}
+
 update();
-setInterval(update, 2000);
+updateLogs();
+updateStats();
+setInterval(update, 5000);
+setInterval(updateLogs, 2000);
+setInterval(updateStats, 10000);
 </script>
 </body>
 </html>

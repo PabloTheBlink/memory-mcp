@@ -345,3 +345,9 @@ export async function setMeta(key: string, value: string): Promise<void> {
   await db.setMeta(key, value);
 }
 
+export async function logEvent(event: string, userId: string | null = null): Promise<void> {
+  const db = await getDb();
+  const now = Date.now();
+  await db.run("INSERT INTO logs (event, timestamp, user_id) VALUES (?, ?, ?)", [event, now, userId]);
+}
+

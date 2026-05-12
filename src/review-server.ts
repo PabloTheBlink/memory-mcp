@@ -7,11 +7,11 @@ import {
   getNodeById,
   deleteNode,
   deleteEdge,
-  getDb,
   MemoryNode,
   MemoryEdge,
   rewireEdges,
 } from "./graph";
+import { getDb } from "./db";
 import { cosineSimilarity } from "./embeddings";
 
 const PORT = 3131;
@@ -191,6 +191,21 @@ const server = http.createServer(async (req, res) => {
 
   if (req.method === "GET" && url === "/api/duplicates") {
     json(res, await findDuplicates());
+    return;
+  }
+
+  if (req.method === "GET" && url === "/api/logs") {
+    const db = await getDb();
+    const logs = await db.queryAll("SELECT * FROM logs ORDER BY timestamp DESC LIMIT 50");
+    json(res, logs);
+    return;
+  }
+
+  if (req.method === "GET" && url === "/api/stats") {
+    const db = await getDb();
+    const nodes = await db.queryGet("SELECT COUNT(*) as c FROM nodes");
+    const edges = await db.queryGet("SELECT COUNT(*) as c FROM edges");
+    json(res, { nodes: nodes.c, edges: edges.c });
     return;
   }
 

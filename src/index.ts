@@ -30,6 +30,7 @@ import {
   setMeta,
   getMeta,
   getNeighbors,
+  logEvent,
 } from "./graph";
 import { getEmbedding, getEmbeddings, findSimilar, cosineSimilarity } from "./embeddings";
 import { spreadActivation } from "./activation";
@@ -236,6 +237,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case "memory_activate": {
         const { concept, importance = 0.5 } = args as any;
         const deviceId = getDeviceId();
+        await logEvent(`Activating concept: ${concept}`, deviceId);
         const activeContext = await getActiveContext();
         
         // Projects and conceptual hubs are shared by default
@@ -336,6 +338,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         const boost = strength !== undefined ? strength * 0.25 : 0.15;
         await upsertEdge(nodeA.id, nodeB.id, type, boost, deviceId);
+        await logEvent(`Associated ${concept_a} with ${concept_b} (${type})`, deviceId);
 
         // Bind both to context
         const contextNodeId = await ensureContextNode(activeContext);
@@ -369,6 +372,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const { query, top_k = 10 } = args as any;
         const deviceId = getDeviceId();
         const activeContext = await getActiveContext();
+        await logEvent(`Recalling memory for query: ${query}`, deviceId);
 
         const queryEmbedding = await getEmbedding(query);
         const allNodes = await getAllNodes(deviceId);
