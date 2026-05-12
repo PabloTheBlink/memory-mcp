@@ -320,7 +320,8 @@ export async function runMaintenance(force = false): Promise<MaintenanceReport> 
     const neighbors = adjacency.get(node.id) ?? [];
     // Curiosity trigger: Important node with very few associations
     if (node.importance > 0.7 && neighbors.length < 2) {
-      const curiosityLabel = `curiosity:Tell me more about "${node.label}" to bridge knowledge gaps`;
+      const baseLabel = node.label.length > 180 ? node.label.slice(0, 180) + '…' : node.label;
+      const curiosityLabel = `curiosity:Tell me more about "${baseLabel}" to bridge knowledge gaps`;
       const { findOrCreateNode: createNode } = require("./graph");
       const curiosityNode = await createNode(curiosityLabel, null, 0.4, null, node.user_id, node.visibility);
       await upsertEdge(curiosityNode.id, node.id, "semantic", 0.3, node.user_id);

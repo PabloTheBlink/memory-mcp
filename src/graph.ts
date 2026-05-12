@@ -64,23 +64,27 @@ function deserializeEdge(row: any): MemoryEdge {
 }
 
 export async function findOrCreateNode(
-  label: string, 
-  embedding: number[] | null = null, 
+  label: string,
+  embedding: number[] | null = null,
   importance: number = 0.5,
   metadata: Record<string, any> | null = null,
   userId: string | null = null,
   visibility: "private" | "shared" = "private"
 ): Promise<MemoryNode> {
+  label = label.length > 255 ? label.slice(0, 254) + '…' : label;
   const db = await getDb();
   const now = Date.now();
 
-  // Try to find a shared node first, or a private one for this user
+  // Search for the node by label. If label uniqueness is enforced, we must find it regardless of visibility/user
   let existing = await db.queryGet(
-    "SELECT * FROM nodes WHERE label = ? AND (visibility = 'shared' OR user_id = ?)", 
-    [label, userId]
+    "SELECT * FROM nodes WHERE label = ?", 
+    [label]
   );
   
   if (existing) {
+    // If it exists but was private for someone else and we want to use it, 
+    // we could potentially update its visibility or just use it.
+    // For context nodes, they should ideally be shared.
     return deserializeNode(existing);
   }
 
