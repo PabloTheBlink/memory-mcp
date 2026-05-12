@@ -13,7 +13,7 @@ import { cosineSimilarity } from "./embeddings";
 
 const PORT = 3131;
 
-// --- DB helpers not in graph.ts ---
+// --- DB helpers ---
 
 async function renameNode(id: string, newLabel: string): Promise<void> {
   const db = await getDb();
@@ -39,7 +39,7 @@ async function rewireEdges(fromId: string, toId: string): Promise<void> {
   await db.run("DELETE FROM edges WHERE from_id = ? OR to_id = ?", [fromId, fromId]);
 }
 
-// --- Context extraction from episodic edges ---
+// --- Context extraction ---
 
 async function nodeContexts(): Promise<Map<string, string[]>> {
   const edges = await getAllEdges();
@@ -99,7 +99,6 @@ async function findDuplicates(threshold = 0.92): Promise<DuplicateCandidate[]> {
       const lev = levenshtein(la, lb);
       const maxLen = Math.max(la.length, lb.length);
       const textSimilarity = 1 - lev / maxLen;
-
       const likelyFalsePositive = textSimilarity < 0.35;
 
       let reason = "";
@@ -122,10 +121,10 @@ async function findDuplicates(threshold = 0.92): Promise<DuplicateCandidate[]> {
   });
 }
 
-// --- HTML ---
+// --- HTTP helpers ---
 
 function json(res: http.ServerResponse, data: object, status = 200) {
-  res.writeHead(status, { 
+  res.writeHead(status, {
     "Content-Type": "application/json",
     "Cache-Control": "no-cache, no-store, must-revalidate",
     "Pragma": "no-cache",
@@ -141,6 +140,13 @@ async function readBody(req: http.IncomingMessage): Promise<any> {
     req.on("end", () => { try { resolve(JSON.parse(data)); } catch { resolve({}); } });
   });
 }
+
+async function withJson(res: http.ServerResponse, fn: () => Promise<void>) {
+  try { await fn(); json(res, { ok: true }); }
+  catch (e: any) { json(res, { ok: false, error: e.message }); }
+}
+
+// --- Graph data ---
 
 async function buildGraphData() {
   const allNodes = await getAllNodes();
@@ -183,13 +189,10 @@ async function buildGraphData() {
   return { nodes, links, ctxNames };
 }
 
-function renderBrain(): string {
-  return `<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<title>Memory Brain Cluster</title>
-<style>
+// --- HTML rendering ---
+
+function renderStyles(): string {
+  return `
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body { background: #060a12; overflow: hidden; font-family: 'Inter', system-ui, sans-serif; }
   #svg-container { width: 100vw; height: 100vh; }
@@ -264,14 +267,11 @@ function renderBrain(): string {
     color: #ccc; font-size: 0.85rem; width: 180px;
   }
 
-  .user-label { position: fixed; font-size: 1.2rem; font-weight: 800; color: rgba(255,255,255,0.05); pointer-events: none; text-transform: uppercase; letter-spacing: 10px; }
-</style>
-</head>
-<body>
-<div id="svg-container"><svg id="graph"></svg></div>
+  .user-label { position: fixed; font-size: 1.2rem; font-weight: 800; color: rgba(255,255,255,0.05); pointer-events: none; text-transform: uppercase; letter-spacing: 10px; }`;
+}
 
-<div id="nav"><span class="title">NEURAL NETWORK • MULTI-USER</span></div>
-
+function renderInfoPanel(): string {
+  return `
 <div id="info-panel">
   <div style="display:flex; justify-content:space-between; align-items:start">
     <div class="label" id="info-label"></div>
@@ -284,40 +284,38 @@ function renderBrain(): string {
   <div class="row"><span class="key">Last seen</span><span class="val" id="info-last"></span></div>
   <div style="margin-top:8px; color:#555; font-size:0.72rem">Contexts / Types</div>
   <div id="info-contexts" style="margin-top:4px"></div>
-</div>
+</div>`;
+}
 
+function renderLegend(): string {
+  return `
 <div id="legend">
   <h4>Users / Entities</h4>
   <div id="legend-users"></div>
   <div class="row"><div class="swatch" style="background:#059669"></div><span>Shared / Project</span></div>
-  
+
   <h4 style="margin-top:12px">Node Types</h4>
   <div class="row"><div class="swatch" style="background:#8b5cf6"></div><span>Context hub</span></div>
   <div class="row"><div class="swatch" style="background:#fbbf24"></div><span>Conceptual Hub</span></div>
-  
+
   <h4 style="margin-top:12px">Link Types</h4>
   <div class="row"><div class="line-swatch" style="background:#fbbf24"></div><span>abstraction</span></div>
   <div class="row"><div class="line-swatch" style="background:#f97316"></div><span>causal</span></div>
   <div class="row"><div class="line-swatch" style="background:#38bdf8"></div><span>semantic</span></div>
   <div class="row"><div class="line-swatch" style="background:#4ade80"></div><span>temporal</span></div>
   <div class="row"><div class="line-swatch" style="background:#c084fc"></div><span>episodic</span></div>
-</div>
+</div>`;
+}
 
-<div id="user-a-label" class="user-label" style="top:50%; left:20%; transform:translate(-50%,-50%) rotate(-90deg)">BRAIN A</div>
-<div id="user-b-label" class="user-label" style="top:50%; left:80%; transform:translate(-50%,-50%) rotate(90deg)">BRAIN B</div>
-<div id="shared-label" class="user-label" style="top:10%; left:50%; transform:translate(-50%,-50%)">SHARED NUCLEUS</div>
-
-<div id="search"><input id="search-input" placeholder="Search neurons…" /></div>
-
-<script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js"></script>
-<script>
+function renderD3Script(): string {
+  return `
 const W = window.innerWidth, H = window.innerHeight;
 const svg = d3.select('#graph').attr('viewBox', [0,0,W,H]);
 const container = svg.append('g');
 
+// --- Glow filters ---
 const defs = svg.append('defs');
 ['blue','purple','orange','green','white','emerald'].forEach(name => {
-  const colors = { blue:'#38bdf8', purple:'#8b5cf6', orange:'#f97316', green:'#4ade80', white:'#ffffff', emerald:'#10b981' };
   const f = defs.append('filter').attr('id', 'glow-'+name).attr('x','-50%').attr('y','-50%').attr('width','200%').attr('height','200%');
   f.append('feGaussianBlur').attr('stdDeviation','4').attr('result','blur');
   const merge = f.append('feMerge');
@@ -333,21 +331,20 @@ let sim, link, node, selected = null;
 let userColor = {};
 let userCenters = {};
 const USER_PALETTES = [
-  ['#3b82f6', '#60a5fa', '#93c5fd'], // Blue
-  ['#ec4899', '#f472b6', '#fbcfe8'], // Pink
-  ['#f59e0b', '#fbbf24', '#fcd34d'], // Amber
-  ['#8b5cf6', '#a78bfa', '#c4b5fd'], // Violet
-  ['#06b6d4', '#22d3ee', '#67e8f9'], // Cyan
+  ['#3b82f6', '#60a5fa', '#93c5fd'],
+  ['#ec4899', '#f472b6', '#fbcfe8'],
+  ['#f59e0b', '#fbbf24', '#fcd34d'],
+  ['#8b5cf6', '#a78bfa', '#c4b5fd'],
+  ['#06b6d4', '#22d3ee', '#67e8f9'],
 ];
 
+// --- Visual helpers ---
+
 function getNodeColor(n) {
-  if (n.visibility === 'shared') return '#10b981'; // Emerald for shared
-  if (n.isContext) return '#8b5cf6';             // Purple for context
-  if (n.isHub) return '#fbbf24';                 // Amber for hubs
-  if (n.user_id) {
-    return userColor[n.user_id] || '#94a3b8';
-  }
-  return '#94a3b8';
+  if (n.visibility === 'shared') return '#10b981';
+  if (n.isContext) return '#8b5cf6';
+  if (n.isHub) return '#fbbf24';
+  return userColor[n.user_id] || '#94a3b8';
 }
 
 function getUserStroke(n) {
@@ -365,6 +362,16 @@ function linkColor(type) {
   return { abstraction:'#fbbf24', causal:'#f97316', semantic:'#38bdf8', temporal:'#4ade80', episodic:'#c084fc' }[type] ?? '#444';
 }
 
+function glowFilter(n) {
+  if (n.visibility === 'shared') return 'url(#glow-emerald)';
+  const uid = n.user_id;
+  const paletteIndex = Array.from(new Set(nodes.map(x => x.user_id))).indexOf(uid);
+  const glowNames = ['blue','purple','orange','green','white','emerald'];
+  return \`url(#glow-\${glowNames[paletteIndex % glowNames.length]})\`;
+}
+
+// --- Force simulation ---
+
 sim = d3.forceSimulation()
   .force('link', d3.forceLink().id(d => d.id).distance(d => {
     const s = nodeById.get(d.source.id ?? d.source);
@@ -375,18 +382,18 @@ sim = d3.forceSimulation()
   .force('charge', d3.forceManyBody().strength(d => (d.isContext || d.isHub) ? -500 : -100))
   .force('center', d3.forceCenter(W/2, H/2))
   .force('x', d3.forceX(d => {
-    if (d.visibility === 'shared') return W/2;
-    if (!d.user_id) return W/2;
+    if (d.visibility === 'shared' || !d.user_id) return W/2;
     return userCenters[d.user_id]?.x ?? W/2;
   }).strength(0.15))
   .force('y', d3.forceY(d => {
-    if (d.visibility === 'shared') return H/2;
-    if (!d.user_id) return H/2;
+    if (d.visibility === 'shared' || !d.user_id) return H/2;
     return userCenters[d.user_id]?.y ?? H/2;
   }).strength(0.05))
   .force('collide', d3.forceCollide().radius(d => nodeRadius(d) + 10));
 
 svg.call(d3.zoom().scaleExtent([0.05, 5]).on('zoom', e => container.attr('transform', e.transform)));
+
+// --- Highlight / selection ---
 
 function highlight(d) {
   const connectedIds = new Set([d.id]);
@@ -400,19 +407,7 @@ function highlight(d) {
   node.classed('hovered', n => n.id === d.id);
   link.classed('dimmed', l => (l.source.id??l.source)!==d.id && (l.target.id??l.target)!==d.id);
   link.classed('highlighted', l => (l.source.id??l.source)===d.id || (l.target.id??l.target)===d.id);
-
-  const panel = document.getElementById('info-panel');
-  panel.style.display = 'block';
-  document.getElementById('info-label').textContent = d.isContext ? d.contextName : (d.isHub ? d.label.replace('concept:','') : d.label);
-  document.getElementById('info-owner').textContent = d.user_id ? d.user_id.slice(0,8) + '...' : 'System';
-  document.getElementById('info-strength').textContent = d.strength.toFixed(3);
-  document.getElementById('info-importance').textContent = (d.importance || 0.5).toFixed(3);
-  document.getElementById('info-access').textContent = d.access_count;
-  document.getElementById('info-last').textContent = new Date(d.last_accessed_at).toLocaleDateString();
-  document.getElementById('info-contexts').innerHTML = d.contexts.map(c => '<span class="ctx-tag">' + c + '</span>').join('') || '<span style="color:#444">none</span>';
-  
-  const vis = document.getElementById('info-visibility');
-  vis.innerHTML = \`<span class="visibility-tag vis-\${d.visibility}">\${d.visibility}</span>\`;
+  showInfoPanel(d);
 }
 
 function clearHighlight() {
@@ -422,67 +417,85 @@ function clearHighlight() {
   selected = null;
 }
 
-async function update() {
-  const data = await fetch('/api/graph').then(r => r.json());
-  const { nodes: newNodes, links: newLinks } = data;
+function showInfoPanel(d) {
+  document.getElementById('info-panel').style.display = 'block';
+  document.getElementById('info-label').textContent = d.isContext ? d.contextName : (d.isHub ? d.label.replace('concept:','') : d.label);
+  document.getElementById('info-owner').textContent = d.user_id ? d.user_id.slice(0,8) + '...' : 'System';
+  document.getElementById('info-strength').textContent = d.strength.toFixed(3);
+  document.getElementById('info-importance').textContent = (d.importance || 0.5).toFixed(3);
+  document.getElementById('info-access').textContent = d.access_count;
+  document.getElementById('info-last').textContent = new Date(d.last_accessed_at).toLocaleDateString();
+  document.getElementById('info-contexts').innerHTML = d.contexts.map(c => '<span class="ctx-tag">' + c + '</span>').join('') || '<span style="color:#444">none</span>';
+  document.getElementById('info-visibility').innerHTML = \`<span class="visibility-tag vis-\${d.visibility}">\${d.visibility}</span>\`;
+}
 
-  // Identify users and assign centers/colors
-  const userIds = Array.from(new Set(newNodes.filter(n => n.user_id).map(n => n.user_id)));
+// --- User registration ---
+
+function registerUser(uid, index, totalUsers) {
+  userColor[uid] = USER_PALETTES[index % USER_PALETTES.length][0];
+  const angle = (index / totalUsers) * Math.PI * 2;
+  userCenters[uid] = {
+    x: W/2 + Math.cos(angle) * W * 0.3,
+    y: H/2 + Math.sin(angle) * H * 0.15,
+  };
+}
+
+function assignUserCenters(userIds) {
   userIds.forEach((uid, i) => {
-    if (!userColor[uid]) {
-      userColor[uid] = USER_PALETTES[i % USER_PALETTES.length][0];
-      // Position users in a circle or line
-      const angle = (i / userIds.length) * Math.PI * 2;
-      const radius = W * 0.3;
-      userCenters[uid] = {
-        x: W/2 + Math.cos(angle) * radius,
-        y: H/2 + Math.sin(angle) * radius * 0.5
-      };
-      // For exactly two brains, use left and right
-      if (userIds.length === 2) {
-        userCenters[userIds[0]] = { x: W * 0.2, y: H/2 };
-        userCenters[userIds[1]] = { x: W * 0.8, y: H/2 };
-        document.getElementById('user-a-label').textContent = 'BRAIN ' + userIds[0].slice(-4);
-        document.getElementById('user-b-label').textContent = 'BRAIN ' + userIds[1].slice(-4);
-      } else {
-        document.getElementById('user-a-label').style.display = 'none';
-        document.getElementById('user-b-label').style.display = 'none';
-      }
-
-      d3.select('#legend-users').append('div').attr('class','row').html(
-        \`<div class="swatch" style="background:\${userColor[uid]}"></div><span>User \${uid.slice(0,6)}</span>\`
-      );
+    if (userColor[uid]) return;
+    registerUser(uid, i, userIds.length);
+    if (userIds.length === 2) {
+      userCenters[userIds[0]] = { x: W * 0.2, y: H/2 };
+      userCenters[userIds[1]] = { x: W * 0.8, y: H/2 };
+      document.getElementById('user-a-label').textContent = 'BRAIN ' + userIds[0].slice(-4);
+      document.getElementById('user-b-label').textContent = 'BRAIN ' + userIds[1].slice(-4);
+    } else {
+      document.getElementById('user-a-label').style.display = 'none';
+      document.getElementById('user-b-label').style.display = 'none';
     }
+    d3.select('#legend-users').append('div').attr('class','row').html(
+      \`<div class="swatch" style="background:\${userColor[uid]}"></div><span>User \${uid.slice(0,6)}</span>\`
+    );
   });
+}
 
-  const oldNodeById = nodeById;
+// --- Node/link reconciliation ---
+
+function reconcileNodes(newNodes, oldNodeById) {
   nodeById = new Map();
-  nodes = newNodes.map(nn => {
+  return newNodes.map(nn => {
     const existing = oldNodeById.get(nn.id);
     if (existing) {
       if (nn.last_fired_at > (existing.last_fired_at || 0)) existing._shouldSpike = true;
       Object.assign(existing, nn);
       nodeById.set(nn.id, existing);
       return existing;
-    } else {
-      nn.x = W/2 + (Math.random()-0.5)*200;
-      nn.y = H/2 + (Math.random()-0.5)*200;
-      nn._isNew = true;
-      nodeById.set(nn.id, nn);
-      return nn;
     }
+    nn.x = W/2 + (Math.random()-0.5)*200;
+    nn.y = H/2 + (Math.random()-0.5)*200;
+    nn._isNew = true;
+    nodeById.set(nn.id, nn);
+    return nn;
   });
+}
 
-  links = newLinks.map(nl => {
-    const existing = links.find(l => (l.source.id || l.source) === nl.source && (l.target.id || l.target) === nl.target);
+function reconcileLinks(newLinks, oldLinks) {
+  return newLinks.map(nl => {
+    const existing = oldLinks.find(l => (l.source.id || l.source) === nl.source && (l.target.id || l.target) === nl.target);
     return existing ? Object.assign(existing, nl) : nl;
   });
+}
 
+// --- DOM rendering ---
+
+function renderLinks() {
   link = gLinks.selectAll('.link').data(links, d => \`\${d.source.id || d.source}-\${d.target.id || d.target}\`)
     .join('line').attr('class','link')
     .attr('stroke', d => linkColor(d.type))
     .attr('stroke-width', d => Math.max(0.3, d.weight * 2.5));
+}
 
+function renderNodes() {
   node = gNodes.selectAll('.node').data(nodes, d => d.id)
     .join(
       enter => {
@@ -504,13 +517,7 @@ async function update() {
     .attr('fill', d => getNodeColor(d) + '22')
     .attr('stroke', d => getUserStroke(d))
     .attr('stroke-width', d => d.isContext || d.isHub ? 2.5 : 1.5)
-    .attr('filter', d => {
-        if (d.visibility === 'shared') return 'url(#glow-emerald)';
-        const uid = d.user_id;
-        const paletteIndex = Array.from(new Set(nodes.map(n => n.user_id))).indexOf(uid);
-        const glowNames = ['blue','purple','orange','green','white','emerald'];
-        return \`url(#glow-\${glowNames[paletteIndex % glowNames.length]})\`;
-    });
+    .attr('filter', d => glowFilter(d));
 
   node.select('text')
     .attr('dy', d => -(nodeRadius(d) + 5))
@@ -526,35 +533,49 @@ async function update() {
         node.classed('selected', n => n.id === d.id);
         highlight(d);
       });
+}
 
+function animateNewNodes() {
   nodes.forEach(n => {
-    if (n._isNew || n._shouldSpike) {
-      const el = gNodes.select(\`#node-\${n.id}\`).select('circle');
-      if (el.empty()) return;
-      const baseR = nodeRadius(n);
-      const color = getNodeColor(n);
-      const stroke = getUserStroke(n);
-      el.interrupt()
-        .attr('r', baseR * 3)
-        .attr('stroke', '#ffffff').attr('stroke-width', 6).attr('filter', 'url(#glow-white)')
-        .transition().duration(n._isNew ? 1000 : 600).ease(d3.easeQuadOut)
-        .attr('r', baseR).attr('stroke', stroke).attr('stroke-width', n.isContext || n.isHub ? 2.5 : 1.5)
-        .attr('filter', n.visibility === 'shared' ? 'url(#glow-emerald)' : (
-          () => {
-             const uid = n.user_id;
-             const paletteIndex = Array.from(new Set(nodes.map(node => node.user_id))).indexOf(uid);
-             const glowNames = ['blue','purple','orange','green','white','emerald'];
-             return \`url(#glow-\${glowNames[paletteIndex % glowNames.length]})\`;
-          }
-        )());
-      n._isNew = false; n._shouldSpike = false;
-    }
+    if (!n._isNew && !n._shouldSpike) return;
+    const el = gNodes.select(\`#node-\${n.id}\`).select('circle');
+    if (el.empty()) return;
+    const baseR = nodeRadius(n);
+    const stroke = getUserStroke(n);
+    el.interrupt()
+      .attr('r', baseR * 3)
+      .attr('stroke', '#ffffff').attr('stroke-width', 6).attr('filter', 'url(#glow-white)')
+      .transition().duration(n._isNew ? 1000 : 600).ease(d3.easeQuadOut)
+      .attr('r', baseR).attr('stroke', stroke).attr('stroke-width', n.isContext || n.isHub ? 2.5 : 1.5)
+      .attr('filter', glowFilter(n));
+    n._isNew = false;
+    n._shouldSpike = false;
   });
+}
+
+// --- Main update loop ---
+
+async function update() {
+  const data = await fetch('/api/graph').then(r => r.json());
+  const { nodes: newNodes, links: newLinks } = data;
+
+  const userIds = Array.from(new Set(newNodes.filter(n => n.user_id).map(n => n.user_id)));
+  assignUserCenters(userIds);
+
+  const oldNodeById = nodeById;
+  nodes = reconcileNodes(newNodes, oldNodeById);
+  links = reconcileLinks(newLinks, links);
+
+  renderLinks();
+  renderNodes();
+  animateNewNodes();
 
   sim.nodes(nodes);
   sim.force('link').links(links);
   sim.alpha(0.05).restart();
 }
+
+// --- Tick & search ---
 
 sim.on('tick', () => {
   if (!link || !node) return;
@@ -572,12 +593,65 @@ document.getElementById('search-input').addEventListener('input', e => {
 });
 
 update();
-setInterval(update, 2000);
-</script>
+setInterval(update, 2000);`;
+}
+
+function renderBrain(): string {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Memory Brain Cluster</title>
+<style>${renderStyles()}</style>
+</head>
+<body>
+<div id="svg-container"><svg id="graph"></svg></div>
+<div id="nav"><span class="title">NEURAL NETWORK • MULTI-USER</span></div>
+${renderInfoPanel()}
+${renderLegend()}
+<div id="user-a-label" class="user-label" style="top:50%; left:20%; transform:translate(-50%,-50%) rotate(-90deg)">BRAIN A</div>
+<div id="user-b-label" class="user-label" style="top:50%; left:80%; transform:translate(-50%,-50%) rotate(90deg)">BRAIN B</div>
+<div id="shared-label" class="user-label" style="top:10%; left:50%; transform:translate(-50%,-50%)">SHARED NUCLEUS</div>
+<div id="search"><input id="search-input" placeholder="Search neurons…" /></div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js"></script>
+<script>${renderD3Script()}</script>
 </body>
 </html>`;
 }
 
+// --- Route handlers ---
+
+async function handleGetGraph(res: http.ServerResponse) {
+  json(res, await buildGraphData());
+}
+
+async function handleDeleteNode(res: http.ServerResponse, body: any) {
+  await withJson(res, () => deleteNode(body.id));
+}
+
+async function handleDeleteEdge(res: http.ServerResponse, body: any) {
+  await withJson(res, () => deleteEdge(body.from_id, body.to_id));
+}
+
+async function handleRename(res: http.ServerResponse, body: any) {
+  await withJson(res, () => renameNode(body.id, body.label));
+}
+
+async function handleMerge(res: http.ServerResponse, body: any) {
+  await withJson(res, async () => {
+    await rewireEdges(body.delete_id, body.keep_id);
+    await deleteNode(body.delete_id);
+  });
+}
+
+// --- Server ---
+
+const POST_ROUTES: Record<string, (res: http.ServerResponse, body: any) => Promise<void>> = {
+  "/delete-node": handleDeleteNode,
+  "/delete-edge": handleDeleteEdge,
+  "/rename": handleRename,
+  "/merge": handleMerge,
+};
 
 const server = http.createServer(async (req, res) => {
   const url = req.url ?? "/";
@@ -589,37 +663,15 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (req.method === "GET" && url === "/api/graph") {
-    json(res, await buildGraphData());
+    await handleGetGraph(res);
     return;
   }
 
   if (req.method === "POST") {
-    const body = await readBody(req);
-
-    if (url === "/delete-node") {
-      try { await deleteNode(body.id); json(res, { ok: true }); }
-      catch (e: any) { json(res, { ok: false, error: e.message }); }
-      return;
-    }
-
-    if (url === "/delete-edge") {
-      try { await deleteEdge(body.from_id, body.to_id); json(res, { ok: true }); }
-      catch (e: any) { json(res, { ok: false, error: e.message }); }
-      return;
-    }
-
-    if (url === "/rename") {
-      try { await renameNode(body.id, body.label); json(res, { ok: true }); }
-      catch (e: any) { json(res, { ok: false, error: e.message }); }
-      return;
-    }
-
-    if (url === "/merge") {
-      try {
-        await rewireEdges(body.delete_id, body.keep_id);
-        await deleteNode(body.delete_id);
-        json(res, { ok: true });
-      } catch (e: any) { json(res, { ok: false, error: e.message }); }
+    const handler = POST_ROUTES[url];
+    if (handler) {
+      const body = await readBody(req);
+      await handler(res, body);
       return;
     }
   }
