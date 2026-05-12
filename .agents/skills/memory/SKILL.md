@@ -35,3 +35,27 @@ description: "Protocolo de Memoria y Persistencia para Pablo usando herramientas
 - **Anticipación**: Si detectas que vas a realizar una tarea repetitiva, usa `memory_learn_rule` para que Pablo no tenga que repetirlo en la siguiente sesión.
 - **Descubrimiento**: Usa `memory_suggest` periódicamente para descubrir conexiones que no son obvias en la superficie pero están vinculadas semánticamente.
 - **Higiene**: Los nodos ahora se limpian y asocian proactivamente en segundo plano durante el mantenimiento.
+
+## Patrones de Estructura de Datos (Convenciones)
+
+| Tipo | Prefijo / Formato | Contexto sugerido | Vínculos recomendados |
+|---|---|---|---|
+| **Tareas** | `Tarea: [Status] Descripción` | `project:Nombre` | `causal` (dependencia), `temporal` (orden) |
+| **Documentación** | `doc:Título` o `concept:Nombre` | `project:Nombre` | `abstraction` (jerarquía) |
+| **Calendario** | `event:YYYY-MM-DD - Descripción` | `personal` o `calendar` | `temporal` (secuencia) |
+| **Reglas** | `rule:Descripción` | El de la tarea asociada | `semantic` |
+
+### Procedimiento para Tareas
+1. `memory_set_context` con el proyecto (ej: `project:Devetty`).
+2. `memory_activate` con la tarea usando el prefijo `Tarea:`.
+3. `memory_associate` para definir dependencias (`causal`) o bloqueos.
+
+### Procedimiento para Documentación
+1. `memory_set_context` con el proyecto.
+2. **Atomización**: No guardes bloques gigantes. Extrae conceptos clave y actívalos individualmente.
+3. Vincular conceptos a la arquitectura o al nodo raíz del proyecto con `abstraction`.
+
+### Procedimiento para Calendario
+1. `memory_set_context({ context: "calendar" })`.
+2. `memory_activate` con formato `event:YYYY-MM-DD - Título`.
+3. El sistema los ordenará por proximidad temporal en el `memory_replay`.
