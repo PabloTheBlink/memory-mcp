@@ -2,6 +2,7 @@ import http from "http";
 import fs from "fs";
 import path from "path";
 import {
+  findOrCreateNode,
   getAllNodes,
   getAllEdges,
   getNodeById,
@@ -12,7 +13,9 @@ import {
   rewireEdges,
 } from "./graph";
 import { getDb } from "./db";
-import { cosineSimilarity } from "./embeddings";
+import { getEmbedding, findSimilar, cosineSimilarity } from "./embeddings";
+import { spreadActivation } from "./activation";
+import { getActiveContext, ensureContextNode, getDeviceId } from "./context";
 
 const PORT = 3131;
 
@@ -148,6 +151,7 @@ async function buildGraphData() {
     access_count: n.access_count,
     last_accessed_at: n.last_accessed_at,
     last_fired_at: n.last_fired_at,
+    last_suggested_at: n.last_suggested_at || 0,
     metadata: n.metadata,
     user_id: n.user_id,
     visibility: n.visibility,
@@ -206,6 +210,59 @@ const server = http.createServer(async (req, res) => {
     const nodes = await db.queryGet("SELECT COUNT(*) as c FROM nodes");
     const edges = await db.queryGet("SELECT COUNT(*) as c FROM edges");
     json(res, { nodes: nodes.c, edges: edges.c });
+    return;
+  }
+
+  if (req.method === "GET" && url === "/api/suggest") {
+    const deviceId = getDeviceId();
+    const activeContext = await getActiveContext();
+    const contextNodeId = await ensureContextNode(activeContext);
+    
+    const allNodes = await getAllNodes(deviceId);
+    const fired = allNodes
+      .filter(n => (Date.now() - n.last_fired_at) < 15 * 60 * 1000)
+      .map(n => ({ id: n.id, activation: 1.0 }));
+    
+    const seeds = fired.length > 0 ? fired : [{ id: contextNodeId, activation: 1.0 }];
+    const result = await spreadActivation(seeds, 5, 0.45, 0.01, contextNodeId, true);
+    
+    const suggestions = result.nodes
+      .filter(n => !n.label.startsWith("[ctx:") && !fired.some(f => f.id === n.id))
+      .sort((a, b) => b.activation - a.activation)
+      .slice(0, 5)
+      .map(n => ({ label: n.label, activation: n.activation }));
+    
+    json(res, { suggestions, context: activeContext });
+    return;
+  }
+
+  if (req.method === "GET" && url === "/api/context-summary") {
+    const deviceId = getDeviceId();
+    const activeContext = await getActiveContext();
+    const contextNodeId = await ensureContextNode(activeContext);
+    
+    const nodes = await getAllNodes(deviceId);
+    const contextNode = nodes.find(n => n.id === contextNodeId);
+    
+    const edges = await getAllEdges(deviceId);
+    const neighbors = edges
+      .filter(e => e.from_id === contextNodeId || e.to_id === contextNodeId)
+      .map(e => {
+        const otherId = e.from_id === contextNodeId ? e.to_id : e.from_id;
+        const otherNode = nodes.find(n => n.id === otherId);
+        return { label: otherNode?.label, weight: e.weight };
+      })
+      .filter(n => n.label);
+
+    const hubs = neighbors
+      .filter(n => n.label!.startsWith("concept:") || n.weight > 0.8)
+      .map(n => n.label);
+    
+    json(res, { 
+      context: activeContext,
+      conceptual_hubs: hubs,
+      total_context_nodes: neighbors.length
+    });
     return;
   }
 

@@ -16,6 +16,7 @@ export interface MemoryNode {
   metadata: Record<string, any> | null;
   user_id: string | null;
   visibility: "private" | "shared";
+  last_suggested_at: number;
 }
 
 export interface MemoryEdge {
@@ -47,6 +48,7 @@ function deserializeNode(row: any): MemoryNode {
     metadata: row.metadata ? JSON.parse(row.metadata) : null,
     user_id: row.user_id,
     visibility: row.visibility || "private",
+    last_suggested_at: row.last_suggested_at || 0,
   };
 }
 
@@ -94,7 +96,7 @@ export async function findOrCreateNode(
     VALUES (?, ?, ?, 0.5, ?, 0, ?, ?, 0, ?, ?, ?)
   `, [id, label, embedding ? JSON.stringify(embedding) : null, importance, now, now, metadata ? JSON.stringify(metadata) : null, userId, visibility]);
 
-  return { id, label, embedding, strength: 0.5, importance, access_count: 0, created_at: now, last_accessed_at: now, last_fired_at: 0, metadata, user_id: userId, visibility };
+  return { id, label, embedding, strength: 0.5, importance, access_count: 0, created_at: now, last_accessed_at: now, last_fired_at: 0, metadata, user_id: userId, visibility, last_suggested_at: 0 };
 }
 
 export async function getNodeById(id: string): Promise<MemoryNode | null> {
@@ -142,6 +144,12 @@ export async function fireNode(id: string): Promise<void> {
   const db = await getDb();
   const now = Date.now();
   await db.run("UPDATE nodes SET last_fired_at = ? WHERE id = ?", [now, id]);
+}
+
+export async function suggestNode(id: string): Promise<void> {
+  const db = await getDb();
+  const now = Date.now();
+  await db.run("UPDATE nodes SET last_suggested_at = ? WHERE id = ?", [now, id]);
 }
 
 export async function deleteNode(id: string): Promise<void> {
@@ -287,6 +295,44 @@ export async function getNeighbors(nodeId: string, userId?: string): Promise<Arr
     node: deserializeNode(r),
     edge: deserializeEdge({ ...r, user_id: r.edge_user_id })
   }));
+}
+
+export async function getNeighborsBatch(nodeIds: string[], userId?: string): Promise<Map<string, Array<{ node: MemoryNode; edge: MemoryEdge }>>> {
+  if (nodeIds.length === 0) return new Map();
+  const db = await getDb();
+  const placeholders = nodeIds.map(() => "?").join(",");
+  
+  let sql = `
+    SELECT n.*, e.weight, e.type, e.co_occurrences, e.created_at as edge_created_at,
+           e.last_reinforced_at, e.from_id, e.to_id, e.user_id as edge_user_id,
+           CASE WHEN e.from_id IN (${placeholders}) THEN e.from_id ELSE e.to_id END as source_node_id
+    FROM edges e
+    JOIN nodes n ON (e.to_id = n.id OR e.from_id = n.id)
+    WHERE (e.from_id IN (${placeholders}) OR e.to_id IN (${placeholders}))
+    AND n.id NOT IN (${placeholders})
+  `;
+  
+  // We need to provide the nodeIds 4 times: for the CASE, from_id, to_id, and NOT IN
+  const params: any[] = [...nodeIds, ...nodeIds, ...nodeIds, ...nodeIds];
+  
+  if (userId) {
+    sql += " AND (n.user_id = ? OR n.visibility = 'shared')";
+    params.push(userId);
+  }
+  
+  const rows = await db.queryAll(sql, params);
+  const result = new Map<string, Array<{ node: MemoryNode; edge: MemoryEdge }>>();
+  
+  for (const r of rows) {
+    const sourceId = r.source_node_id;
+    if (!result.has(sourceId)) result.set(sourceId, []);
+    result.get(sourceId)!.push({
+      node: deserializeNode(r),
+      edge: deserializeEdge({ ...r, user_id: r.edge_user_id })
+    });
+  }
+  
+  return result;
 }
 
 export async function getTopNodes(limit: number = 50, userId?: string): Promise<MemoryNode[]> {

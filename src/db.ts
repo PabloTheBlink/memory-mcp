@@ -50,7 +50,8 @@ class SqliteAdapter implements DBAdapter {
         last_fired_at INTEGER NOT NULL DEFAULT 0,
         metadata TEXT,
         user_id TEXT,
-        visibility TEXT DEFAULT 'private'
+        visibility TEXT DEFAULT 'private',
+        last_suggested_at INTEGER DEFAULT 0
       );
 
       CREATE TABLE IF NOT EXISTS edges (
@@ -95,6 +96,9 @@ class SqliteAdapter implements DBAdapter {
     }
     if (!info.some(col => col.name === "visibility")) {
       this.db.exec("ALTER TABLE nodes ADD COLUMN visibility TEXT DEFAULT 'private'");
+    }
+    if (!info.some(col => col.name === "last_suggested_at")) {
+      this.db.exec("ALTER TABLE nodes ADD COLUMN last_suggested_at INTEGER DEFAULT 0");
     }
 
     const edgeInfo = this.db.prepare("PRAGMA table_info(edges)").all() as any[];
@@ -163,7 +167,8 @@ class MysqlAdapter implements DBAdapter {
           last_fired_at BIGINT NOT NULL DEFAULT 0,
           metadata LONGTEXT,
           user_id VARCHAR(100),
-          visibility VARCHAR(20) DEFAULT 'private'
+          visibility VARCHAR(20) DEFAULT 'private',
+          last_suggested_at BIGINT DEFAULT 0
         );
       `);
 
@@ -209,6 +214,7 @@ class MysqlAdapter implements DBAdapter {
       await addColumn("nodes", "metadata", "LONGTEXT");
       await addColumn("nodes", "user_id", "VARCHAR(100)");
       await addColumn("nodes", "visibility", "VARCHAR(20) DEFAULT 'private'");
+      await addColumn("nodes", "last_suggested_at", "BIGINT DEFAULT 0");
       await addColumn("edges", "user_id", "VARCHAR(100)");
 
       // Create indexes if they don't exist

@@ -190,8 +190,26 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         "required": ["start_concept"],
       },
     },
+    {
+      "name": "memory_suggest",
+      "description": "Proactively suggests contextually relevant memories based on current activity. Use this when you need inspiration or to discover hidden associations.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "limit": { "type": "number", "default": 5 }
+        }
+      },
+    },
+    {
+      "name": "memory_get_context_summary",
+      "description": "Returns a high-level summary of the current active context, including main conceptual hubs and recent activity.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {}
+      },
+    },
   ],
-}));
+})),
 
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
@@ -268,6 +286,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (lastActivatedId && lastActivatedId !== node.id) {
           await upsertEdge(node.id, lastActivatedId, "temporal", 0.25, deviceId);
         }
+        
+        // NEW: Proactive Associative Linking
+        // Link to other currently "hot" nodes in this context to build a dense local web
+        const now = Date.now();
+        const topFired = allNodes
+          .filter(n => n.id !== node.id && (now - n.last_fired_at) < 10 * 60 * 1000)
+          .sort((a, b) => b.last_fired_at - a.last_fired_at)
+          .slice(0, 2);
+        for (const hot of topFired) {
+          await upsertEdge(node.id, hot.id, "episodic", 0.15, deviceId);
+        }
+
         await setMeta(`last_act_${activeContext}_${deviceId}`, node.id);
 
         // Bind to active context
@@ -589,6 +619,64 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               }),
             },
           ],
+        };
+      }
+
+      case "memory_suggest": {
+        const { limit = 5 } = args as any;
+        const deviceId = getDeviceId();
+        const activeContext = await getActiveContext();
+        const contextNodeId = await ensureContextNode(activeContext);
+        const deviceNodeId = await ensureContextNode(`device:${deviceId}`);
+
+        // Seed with currently fired nodes or active context
+        const allNodes = await getAllNodes(deviceId);
+        const fired = allNodes
+          .filter(n => (Date.now() - n.last_fired_at) < 15 * 60 * 1000)
+          .map(n => ({ id: n.id, activation: 1.0 }));
+        
+        const seeds = fired.length > 0 ? fired : [{ id: contextNodeId, activation: 1.0 }];
+        
+        const result = await spreadActivation(seeds, 3, 0.45, 0.08, contextNodeId, true);
+        const suggestions = result.nodes
+          .filter(n => !isContextNode(n.label) && !fired.some(f => f.id === n.id))
+          .sort((a, b) => b.activation - a.activation)
+          .slice(0, limit)
+          .map(n => ({
+             label: n.label,
+             reason: "Associative resonance with current activity"
+          }));
+
+        return {
+          content: [{ type: "text", text: JSON.stringify({ suggestions, context: activeContext }) }],
+        };
+      }
+
+      case "memory_get_context_summary": {
+        const deviceId = getDeviceId();
+        const activeContext = await getActiveContext();
+        const contextNodeId = await ensureContextNode(activeContext);
+        
+        const neighbors = await getNeighbors(contextNodeId, deviceId);
+        const hubs = neighbors
+          .filter(n => n.node.label.startsWith("concept:") || n.node.importance > 0.8)
+          .map(n => n.node.label);
+        
+        const recent = neighbors
+          .sort((a, b) => b.node.last_accessed_at - a.node.last_accessed_at)
+          .slice(0, 10)
+          .map(n => n.node.label);
+
+        return {
+          content: [{ 
+            type: "text", 
+            text: JSON.stringify({ 
+              context: activeContext,
+              conceptual_hubs: hubs,
+              recently_accessed: recent,
+              total_context_nodes: neighbors.length
+            }) 
+          }],
         };
       }
 

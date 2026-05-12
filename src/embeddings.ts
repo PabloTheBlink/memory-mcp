@@ -6,9 +6,12 @@ import { pipeline, env } from '@xenova/transformers';
 (env as any).allowLocalModels = true;
 
 let extractor: any = null;
+const embeddingCache = new Map<string, number[]>();
 
 export async function getEmbedding(text: string): Promise<number[]> {
+  if (embeddingCache.has(text)) return embeddingCache.get(text)!;
   const result = await getEmbeddings([text]);
+  embeddingCache.set(text, result[0]);
   return result[0];
 }
 
@@ -18,19 +21,35 @@ export async function getEmbeddings(texts: string[]): Promise<number[][]> {
   }
 
   const results: number[][] = [];
-  // Process in chunks to avoid memory issues with very large batches
-  const CHUNK_SIZE = 16;
-  for (let i = 0; i < texts.length; i += CHUNK_SIZE) {
-    const chunk = texts.slice(i, i + CHUNK_SIZE);
-    const output = await extractor(chunk, { pooling: 'mean', normalize: true });
-    
-    // Xenova returns a single Tensor for batch, we need to split it
-    const data = output.data;
-    const dim = output.dims[1];
-    for (let j = 0; j < chunk.length; j++) {
-      results.push(Array.from(data.slice(j * dim, (j + 1) * dim)));
+  const toFetch: string[] = [];
+  const fetchIndices: number[] = [];
+
+  for (let i = 0; i < texts.length; i++) {
+    if (embeddingCache.has(texts[i])) {
+      results[i] = embeddingCache.get(texts[i])!;
+    } else {
+      toFetch.push(texts[i]);
+      fetchIndices.push(i);
     }
   }
+
+  if (toFetch.length > 0) {
+    const CHUNK_SIZE = 16;
+    for (let i = 0; i < toFetch.length; i += CHUNK_SIZE) {
+      const chunk = toFetch.slice(i, i + CHUNK_SIZE);
+      const output = await extractor(chunk, { pooling: 'mean', normalize: true });
+      
+      const data = output.data;
+      const dim = output.dims[1];
+      for (let j = 0; j < chunk.length; j++) {
+        const emb = Array.from(data.slice(j * dim, (j + 1) * dim)) as number[];
+        const originalIndex = fetchIndices[i + j];
+        results[originalIndex] = emb;
+        embeddingCache.set(toFetch[i + j], emb);
+      }
+    }
+  }
+
   return results;
 }
 
