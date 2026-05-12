@@ -1,23 +1,35 @@
-# Skill: Protocolo de Memoria y Persistencia
+---
+name: memory
+description: "Protocolo de Memoria y Persistencia para Pablo usando herramientas MCP de memoria. Úsalo cuando necesites guardar, recuperar o gestionar memoria entre sesiones: inicio de sesión (status + recall), aprender nuevos conceptos o reglas del usuario, asociar nodos, reconstruir historial, o hacer mantenimiento de memoria al cierre."
+---
 
-Este protocolo es de obligado cumplimiento para asegurar la integridad de la memoria de Pablo y evitar redundancias o inconsistencias.
+# Protocolo de Memoria y Persistencia
 
-## 1. Fase de Inicio (Recuperación)
-- **Status Obligatorio**: Ejecutar `memory_status` al primer turno de cada sesión.
-- **Recall Contextual**: Realizar un `memory_recall` sobre "preferencias de desarrollo, reglas de estilo y perfil de Pablo".
-- **Sincronización**: Adaptar el tono y las decisiones técnicas (stack, testing, herramientas) a lo recuperado.
+## Inicio de sesión (ejecutar siempre en orden)
 
-## 2. Fase de Desarrollo (Activación)
-- **Nuevos Conceptos**: Cada vez que se aprenda algo nuevo sobre un proyecto o sobre Pablo, usar `memory_activate`.
-- **Importancia**: Asignar importancia > 0.7 a decisiones técnicas o reglas de estilo.
-- **Vínculos**: No dejar nodos aislados. Asociar siempre nuevos conceptos a los hubs existentes (`Pablo`, `project:name`, etc.) mediante `memory_associate`.
+1. `memory_status` — ver estadísticas y contexto activo
+2. `memory_set_context` — con `"project:bal_isquad"` u otro contexto activo (vacío = auto-detección)
+3. `memory_recall` — query: `"preferencias de desarrollo, reglas de estilo y perfil de Pablo"`
+4. Adaptar tono y decisiones técnicas a lo recuperado
 
-## 3. Fase de Cierre (Verificación)
-- **Integridad**: Antes de terminar la sesión, revisar si hay incongruencias entre lo aprendido hoy y lo que ya estaba en memoria.
-- **Disparo Neuronal**: Asegurar que las herramientas de memoria estén disparando los eventos de visualización (`fireNode`).
-- **Mantenimiento**: Si se han creado muchos nodos, ejecutar `memory_maintenance` para consolidar.
+## Durante la sesión
 
-## 4. Reglas de Oro
-- **No suponer**: Si hay dudas sobre una preferencia, preguntar antes de guardar.
-- **Adaptabilidad**: Si el stack cambia (ej: de PHP a TS), actualizar las reglas de testing asociadas.
-- **Brevitud**: Los nodos deben ser concisos y directos, siguiendo el estilo de comunicación de Pablo.
+| Situación | Herramienta |
+|---|---|
+| Preferencia o regla explícita de Pablo | `memory_learn_rule` |
+| Nuevo hecho / concepto / decisión técnica | `memory_activate` (importance > 0.7 para decisiones importantes) |
+| Vincular dos conceptos | `memory_associate` (tipos: `causal`, `temporal`, `semantic`, `episodic`, `abstraction`) |
+| Reconstruir historial / secuencia de decisiones | `memory_replay` desde el concepto de entrada |
+
+**Nunca dejar nodos aislados**: asociar siempre a hubs `Pablo` o `project:bal_isquad`.
+
+## Cierre de sesión
+
+- `memory_consolidate` — siempre al cerrar (decaimiento Ebbinghaus + poda de débiles)
+- `memory_maintenance` — solo si se crearon muchos nodos (rate-limited: 1/hora; incluye merge + re-linkado)
+
+## Reglas de oro
+
+- `memory_learn_rule` para reglas/preferencias explícitas; `memory_activate` para hechos
+- Preguntar antes de guardar si hay dudas sobre una preferencia
+- Nodos concisos y directos — estilo caveman cuando aplique

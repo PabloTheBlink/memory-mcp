@@ -1,5 +1,4 @@
 import http from "http";
-import { WebSocketServer, WebSocket } from "ws";
 import {
   getAllNodes,
   getAllEdges,
@@ -9,38 +8,21 @@ import {
   getDb,
   MemoryNode,
   MemoryEdge,
+  rewireEdges,
 } from "./graph";
 import { cosineSimilarity } from "./embeddings";
 
 const PORT = 3131;
 
-// --- DB helpers ---
+// --- DB helpers not in graph.ts ---
 
 async function renameNode(id: string, newLabel: string): Promise<void> {
   const db = await getDb();
   await db.run("UPDATE nodes SET label = ? WHERE id = ?", [newLabel, id]);
 }
 
-async function rewireEdges(fromId: string, toId: string): Promise<void> {
-  const db = await getDb();
-  const edges = (await db.queryAll("SELECT * FROM edges WHERE from_id = ? OR to_id = ?", [fromId, fromId]));
-  for (const e of edges) {
-    const src = e.from_id === fromId ? toId : e.from_id;
-    const dst = e.to_id === fromId ? toId : e.to_id;
-    if (src === dst) continue;
-    const [a, b] = src < dst ? [src, dst] : [dst, src];
-    const exists = await db.queryGet("SELECT 1 FROM edges WHERE from_id = ? AND to_id = ?", [a, b]);
-    if (!exists) {
-      await db.run(`
-        INSERT INTO edges (from_id, to_id, weight, type, co_occurrences, created_at, last_reinforced_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-      `, [a, b, e.weight, e.type, e.co_occurrences, e.created_at, e.last_reinforced_at]);
-    }
-  }
-  await db.run("DELETE FROM edges WHERE from_id = ? OR to_id = ?", [fromId, fromId]);
-}
 
-// --- Context extraction ---
+// --- Context extraction from episodic edges ---
 
 async function nodeContexts(): Promise<Map<string, string[]>> {
   const edges = await getAllEdges();
@@ -100,6 +82,7 @@ async function findDuplicates(threshold = 0.92): Promise<DuplicateCandidate[]> {
       const lev = levenshtein(la, lb);
       const maxLen = Math.max(la.length, lb.length);
       const textSimilarity = 1 - lev / maxLen;
+
       const likelyFalsePositive = textSimilarity < 0.35;
 
       let reason = "";
@@ -122,10 +105,10 @@ async function findDuplicates(threshold = 0.92): Promise<DuplicateCandidate[]> {
   });
 }
 
-// --- HTTP helpers ---
+// --- HTML ---
 
 function json(res: http.ServerResponse, data: object, status = 200) {
-  res.writeHead(status, {
+  res.writeHead(status, { 
     "Content-Type": "application/json",
     "Cache-Control": "no-cache, no-store, must-revalidate",
     "Pragma": "no-cache",
@@ -141,13 +124,6 @@ async function readBody(req: http.IncomingMessage): Promise<any> {
     req.on("end", () => { try { resolve(JSON.parse(data)); } catch { resolve({}); } });
   });
 }
-
-async function withJson(res: http.ServerResponse, fn: () => Promise<void>) {
-  try { await fn(); json(res, { ok: true }); }
-  catch (e: any) { json(res, { ok: false, error: e.message }); }
-}
-
-// --- Graph data ---
 
 async function buildGraphData() {
   const allNodes = await getAllNodes();
@@ -190,81 +166,115 @@ async function buildGraphData() {
   return { nodes, links, ctxNames };
 }
 
-// --- HTML rendering ---
-
-function renderStyles(): string {
-  return `
+function renderBrain(): string {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Memory Brain Cluster</title>
+<style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
-  body { background: #00060f; overflow: hidden; font-family: 'Outfit', 'Inter', system-ui, sans-serif; color: #e6edf3; }
-  #svg-container { position: relative; width: 100vw; height: 100vh; }
-  svg { position: relative; width: 100%; height: 100%; z-index: 1; }
-  #impulse-canvas { position: absolute; top: 0; left: 0; pointer-events: none; z-index: 2; }
+  body { background: #060a12; overflow: hidden; font-family: 'Inter', system-ui, sans-serif; }
+  #svg-container { width: 100vw; height: 100vh; }
+  svg { width: 100%; height: 100%; }
 
-  .node { cursor: pointer; }
-  .node text {
-    pointer-events: none; font-size: 11px; fill: #7aa2c8; opacity: 0;
-    transition: opacity 0.3s; font-weight: 600; letter-spacing: 0.3px;
-    paint-order: stroke; stroke: #00060f; stroke-width: 4px; stroke-linejoin: round;
+  .node circle { cursor: pointer; transition: r 0.2s; }
+  .node text { pointer-events: none; font-size: 10px; fill: #ccc; opacity: 0; transition: opacity 0.2s; font-weight: 300; }
+  .node.hovered text, .node.selected text { opacity: 1; font-weight: 500; }
+  .node.dimmed circle { opacity: 0.08; }
+  .node.dimmed text { opacity: 0; }
+
+  .link { 
+    stroke-opacity: 0.35; 
+    stroke-dasharray: 2, 8;
+    animation: neural-flow 30s linear infinite;
+    transition: stroke-opacity 0.2s, stroke-width 0.2s;
   }
-  .node.hovered text, .node.selected text { opacity: 1; fill: #e2f0ff; }
-  .node.dimmed text { opacity: 0 !important; }
-
-  .soma { transition: opacity 0.4s; }
-  .node.dimmed .soma { opacity: 0.04; }
-
-  .aura { pointer-events: none; animation: aura-breathe 3.5s ease-in-out infinite; }
-  .node.hovered .aura, .node.selected .aura { animation: aura-active 1s ease-in-out infinite; }
-  .node.dimmed .aura { opacity: 0 !important; }
-  @keyframes aura-breathe { 0%,100% { opacity: 0.08; } 50% { opacity: 0.22; } }
-  @keyframes aura-active  { 0%,100% { opacity: 0.4;  } 50% { opacity: 0.7;  } }
-
-  .link { fill: none; transition: stroke-opacity 0.3s, stroke-width 0.3s; }
-  .link.dimmed { stroke-opacity: 0.01 !important; }
-  .link.highlighted { stroke-opacity: 0.9 !important; stroke-width: 2.5px !important; }
+  @keyframes neural-flow {
+    from { stroke-dashoffset: 100; }
+    to { stroke-dashoffset: 0; }
+  }
+  .link.dimmed { stroke-opacity: 0.05; }
+  .link.highlighted { 
+    stroke-opacity: 0.95; 
+    stroke-width: 3px; 
+    stroke-dasharray: none; 
+    animation: none;
+  }
+  .link.firing {
+    stroke-opacity: 1;
+    stroke-width: 3px;
+    stroke: #fff !important;
+    filter: url(#glow-white);
+  }
 
   #info-panel {
-    position: fixed; top: 24px; right: 24px;
-    background: rgba(8, 12, 20, 0.88);
-    border: 1px solid rgba(255,255,255,0.07);
-    border-radius: 18px; padding: 22px;
-    min-width: 290px; max-width: 350px;
-    backdrop-filter: blur(24px);
-    display: none; z-index: 100;
-    box-shadow: 0 0 0 1px rgba(99,179,237,0.08), 0 20px 60px rgba(0,0,0,0.7), inset 0 1px 0 rgba(255,255,255,0.06);
+    position: fixed; top: 20px; right: 20px;
+    background: rgba(10,14,24,0.92);
+    border: 1px solid #1e2a3a;
+    border-radius: 12px;
+    padding: 16px 20px;
+    min-width: 240px;
+    max-width: 320px;
+    font-size: 0.82rem;
+    color: #aaa;
+    backdrop-filter: blur(12px);
+    display: none;
+    z-index: 100;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.5);
   }
-  #info-panel .label { font-size: 1rem; color: #f0f6fc; font-weight: 700; margin-bottom: 14px; line-height: 1.4; word-break: break-word; }
-  #info-panel .row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 7px; font-family: 'JetBrains Mono', 'Fira Code', monospace; font-size: 0.72rem; }
-  #info-panel .key { color: #4a5568; text-transform: uppercase; letter-spacing: 0.8px; }
-  #info-panel .val { color: #63b3ed; font-weight: 600; }
+  #info-panel .label { font-size: 1rem; color: #fff; font-weight: 600; margin-bottom: 8px; word-break: break-word; }
+  #info-panel .row { display: flex; justify-content: space-between; margin-bottom: 4px; }
+  #info-panel .key { color: #555; }
+  #info-panel .val { color: #8cf; }
   #info-panel .ctx-tag {
-    display: inline-block; background: rgba(99,179,237,0.1); color: #63b3ed;
-    font-size: 0.68rem; padding: 3px 9px; border-radius: 20px; margin: 3px 3px 0 0;
-    border: 1px solid rgba(99,179,237,0.18);
+    display: inline-block; background: #1a2a3a; color: #6af;
+    font-size: 0.72rem; padding: 2px 8px; border-radius: 10px; margin: 2px 2px 0 0;
   }
-  #info-panel .divider { border: none; border-top: 1px solid rgba(255,255,255,0.05); margin: 12px 0; }
+  #info-panel .visibility-tag {
+    font-size: 0.65rem; padding: 1px 6px; border-radius: 4px; font-weight: bold; text-transform: uppercase;
+  }
+  .vis-shared { background: #059669; color: #fff; }
+  .vis-private { background: #4b5563; color: #fff; }
 
-  #nav { position: fixed; top: 24px; left: 24px; display: flex; flex-direction: column; gap: 5px; }
-  #nav .title { color: #fff; font-size: 0.75rem; font-weight: 900; letter-spacing: 5px; text-transform: uppercase; opacity: 0.6; }
-  #nav .status { color: #3fb950; font-size: 0.62rem; font-weight: 700; text-transform: uppercase; display: flex; align-items: center; gap: 7px; letter-spacing: 1px; }
-  #nav .status::before { content: ''; width: 5px; height: 5px; background: #3fb950; border-radius: 50%; box-shadow: 0 0 10px #3fb950, 0 0 20px #3fb950; animation: pulse-dot 2s infinite; }
-  @keyframes pulse-dot { 0%,100% { opacity: 1; box-shadow: 0 0 10px #3fb950, 0 0 20px #3fb950; } 50% { opacity: 0.5; box-shadow: 0 0 4px #3fb950; } }
+  #nav {
+    position: fixed; top: 20px; left: 20px;
+    display: flex; gap: 8px; align-items: center;
+  }
+  #nav .title { color: #88a; font-size: 0.75rem; font-weight: 800; letter-spacing: 2px; }
 
   #legend {
-    position: fixed; bottom: 24px; left: 24px;
-    background: rgba(8,12,20,0.82); border: 1px solid rgba(255,255,255,0.06);
-    border-radius: 14px; padding: 14px 16px;
-    font-size: 0.72rem; color: #6b7280; backdrop-filter: blur(16px);
+    position: fixed; bottom: 20px; left: 20px;
+    background: rgba(10,14,24,0.85); border: 1px solid #1e2a3a;
+    border-radius: 10px; padding: 12px 16px;
+    font-size: 0.75rem; color: #666;
+    backdrop-filter: blur(8px);
     max-height: 40vh; overflow-y: auto;
   }
-  #legend h4 { color: #374151; margin-bottom: 8px; font-size: 0.65rem; text-transform: uppercase; letter-spacing: 2px; }
+  #legend h4 { color: #aaa; margin-bottom: 8px; font-size: 0.7rem; text-transform: uppercase; letter-spacing: 1px; }
   #legend .row { display: flex; align-items: center; gap: 8px; margin-bottom: 5px; }
-  .swatch { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
-  .line-swatch { width: 18px; height: 2px; border-radius: 2px; flex-shrink: 0; }
-  `;
-}
+  #legend .swatch { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+  #legend .line-swatch { width: 24px; height: 2px; flex-shrink: 0; }
 
-function renderInfoPanel(): string {
-  return `
+  #search {
+    position: fixed; bottom: 20px; right: 20px;
+    background: rgba(10,14,24,0.85); border: 1px solid #1e2a3a;
+    border-radius: 10px; padding: 8px 12px;
+    backdrop-filter: blur(8px);
+  }
+  #search input {
+    background: transparent; border: none; outline: none;
+    color: #ccc; font-size: 0.85rem; width: 180px;
+  }
+
+  .user-label { position: fixed; font-size: 1.2rem; font-weight: 800; color: rgba(255,255,255,0.05); pointer-events: none; text-transform: uppercase; letter-spacing: 10px; }
+</style>
+</head>
+<body>
+<div id="svg-container"><svg id="graph"></svg></div>
+
+<div id="nav"><span class="title">NEURAL NETWORK • MULTI-USER</span></div>
+
 <div id="info-panel">
   <div style="display:flex; justify-content:space-between; align-items:start">
     <div class="label" id="info-label"></div>
@@ -277,366 +287,359 @@ function renderInfoPanel(): string {
   <div class="row"><span class="key">Last seen</span><span class="val" id="info-last"></span></div>
   <div style="margin-top:8px; color:#555; font-size:0.72rem">Contexts / Types</div>
   <div id="info-contexts" style="margin-top:4px"></div>
-</div>`;
-}
+</div>
 
-function renderLegend(): string {
-  return `
 <div id="legend">
   <h4>Users / Entities</h4>
   <div id="legend-users"></div>
   <div class="row"><div class="swatch" style="background:#059669"></div><span>Shared / Project</span></div>
-
+  
   <h4 style="margin-top:12px">Node Types</h4>
   <div class="row"><div class="swatch" style="background:#8b5cf6"></div><span>Context hub</span></div>
   <div class="row"><div class="swatch" style="background:#fbbf24"></div><span>Conceptual Hub</span></div>
-
+  
   <h4 style="margin-top:12px">Link Types</h4>
   <div class="row"><div class="line-swatch" style="background:#fbbf24"></div><span>abstraction</span></div>
   <div class="row"><div class="line-swatch" style="background:#f97316"></div><span>causal</span></div>
   <div class="row"><div class="line-swatch" style="background:#38bdf8"></div><span>semantic</span></div>
   <div class="row"><div class="line-swatch" style="background:#4ade80"></div><span>temporal</span></div>
   <div class="row"><div class="line-swatch" style="background:#c084fc"></div><span>episodic</span></div>
-</div>`;
-}
+</div>
 
-function renderD3Script(): string {
-  return `
+<div id="user-a-label" class="user-label" style="top:50%; left:20%; transform:translate(-50%,-50%) rotate(-90deg)">BRAIN A</div>
+<div id="user-b-label" class="user-label" style="top:50%; left:80%; transform:translate(-50%,-50%) rotate(90deg)">BRAIN B</div>
+<div id="shared-label" class="user-label" style="top:10%; left:50%; transform:translate(-50%,-50%)">SHARED NUCLEUS</div>
+
+<div id="search"><input id="search-input" placeholder="Search neurons…" /></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js"></script>
+<script>
 const W = window.innerWidth, H = window.innerHeight;
 const svg = d3.select('#graph').attr('viewBox', [0,0,W,H]);
 const container = svg.append('g');
+
 const defs = svg.append('defs');
-
-// ── SVG filters ─────────────────────────────────────────────────────────────
-const LINK_COLORS = { abstraction:'#f59e0b', causal:'#f97316', semantic:'#38bdf8', temporal:'#4ade80', episodic:'#c084fc' };
-const LINK_FILTERS = { abstraction:'iglow-amber', causal:'iglow-orange', semantic:'iglow-blue', temporal:'iglow-green', episodic:'iglow-purple' };
-
-// Node glow — double blur for rich halo
-const ng = defs.append('filter').attr('id','node-glow').attr('x','-120%').attr('y','-120%').attr('width','340%').attr('height','340%');
-ng.append('feGaussianBlur').attr('in','SourceGraphic').attr('stdDeviation','7').attr('result','blur1');
-ng.append('feGaussianBlur').attr('in','SourceGraphic').attr('stdDeviation','3').attr('result','blur2');
-const ngm = ng.append('feMerge');
-ngm.append('feMergeNode').attr('in','blur1');
-ngm.append('feMergeNode').attr('in','blur2');
-ngm.append('feMergeNode').attr('in','SourceGraphic');
-
-// Impulse glow filters for links
-Object.entries({ amber:'#f59e0b', orange:'#f97316', blue:'#38bdf8', green:'#4ade80', purple:'#c084fc', white:'#fff' }).forEach(([name]) => {
-  const fi = defs.append('filter').attr('id','iglow-'+name).attr('x','-150%').attr('y','-150%').attr('width','400%').attr('height','400%');
-  fi.append('feGaussianBlur').attr('stdDeviation','2').attr('result','b');
-  const m = fi.append('feMerge');
-  m.append('feMergeNode').attr('in','b');
-  m.append('feMergeNode').attr('in','SourceGraphic');
+['blue','purple','orange','green','white','emerald'].forEach(name => {
+  const colors = { blue:'#38bdf8', purple:'#8b5cf6', orange:'#f97316', green:'#4ade80', white:'#ffffff', emerald:'#10b981' };
+  const f = defs.append('filter').attr('id', 'glow-'+name).attr('x','-50%').attr('y','-50%').attr('width','200%').attr('height','200%');
+  f.append('feGaussianBlur').attr('stdDeviation','4').attr('result','blur');
+  const merge = f.append('feMerge');
+  merge.append('feMergeNode').attr('in','blur');
+  merge.append('feMergeNode').attr('in','SourceGraphic');
 });
 
-const NODE_COLORS = { blue:'#3b82f6', pink:'#ec4899', amber:'#f59e0b', purple:'#8b5cf6', emerald:'#10b981', teal:'#06b6d4' };
+const gLinks = container.append('g').attr('class', 'links');
+const gNodes = container.append('g').attr('class', 'nodes');
 
-const gLinks = container.append('g').attr('class','links');
-const gNodes = container.append('g').attr('class','nodes');
-
-
-// ── Impulse canvas ──────────────────────────────────────────────────────────
-const impulseCanvas = document.createElement('canvas');
-impulseCanvas.id = 'impulse-canvas'; impulseCanvas.width = W; impulseCanvas.height = H;
-document.getElementById('svg-container').appendChild(impulseCanvas);
-const ictx = impulseCanvas.getContext('2d');
-
-const IMPULSE_COLORS = { 'iglow-amber':'#f59e0b','iglow-orange':'#f97316','iglow-blue':'#38bdf8','iglow-green':'#4ade80','iglow-purple':'#c084fc','iglow-white':'#fff' };
-const MAX_IMPULSES = 20;
-let activeImpulses = [];
-let rafId = null;
-
-// No shadowBlur — fake glow with layered strokes (much faster)
-function strokeGlow(x1,y1,x2,y2,color,baseWidth,alpha,k) {
-  ictx.lineCap = 'round';
-  ictx.strokeStyle = color;
-  ictx.globalAlpha = alpha * 0.18; ictx.lineWidth = baseWidth*9*k;
-  ictx.beginPath(); ictx.moveTo(x1,y1); ictx.lineTo(x2,y2); ictx.stroke();
-  ictx.globalAlpha = alpha * 0.35; ictx.lineWidth = baseWidth*4*k;
-  ictx.beginPath(); ictx.moveTo(x1,y1); ictx.lineTo(x2,y2); ictx.stroke();
-  ictx.strokeStyle = '#fff';
-  ictx.globalAlpha = alpha * 0.9;  ictx.lineWidth = baseWidth*k;
-  ictx.beginPath(); ictx.moveTo(x1,y1); ictx.lineTo(x2,y2); ictx.stroke();
-}
-
-function rafLoop() {
-  ictx.clearRect(0,0,W,H);
-  const tr = d3.zoomTransform(svg.node());
-  activeImpulses = activeImpulses.filter(i => i.elapsed < i.duration);
-
-  for (const imp of activeImpulses) {
-    if (imp.type === 'bloom') {
-      const p = d3.easeCubicOut(imp.elapsed / imp.duration);
-      const [bx,by] = tr.apply([imp.x, imp.y]);
-      ictx.save();
-      // Outer ring
-      ictx.globalAlpha = (1-p) * 0.4;
-      ictx.strokeStyle = imp.color; ictx.lineWidth = 5*(1-p)*tr.k;
-      ictx.beginPath(); ictx.arc(bx,by,(4+p*35)*tr.k,0,Math.PI*2); ictx.stroke();
-      // Inner ring
-      ictx.globalAlpha = (1-p) * 0.7;
-      ictx.lineWidth = 2*(1-p)*tr.k;
-      ictx.beginPath(); ictx.arc(bx,by,(2+p*16)*tr.k,0,Math.PI*2); ictx.stroke();
-      ictx.restore();
-      imp.elapsed += 16; continue;
-    }
-
-    const p = d3.easeQuadIn(imp.elapsed / imp.duration);
-    const cx = imp.x1+(imp.x2-imp.x1)*p, cy = imp.y1+(imp.y2-imp.y1)*p;
-    const dx = imp.x2-imp.x1, dy = imp.y2-imp.y1;
-    const len = Math.sqrt(dx*dx+dy*dy)||1;
-    const nx = -dy/len, ny = dx/len;
-    const wobble = Math.sin(imp.elapsed*0.25+imp.phase)*4*(1-p)*Math.min(p*5,1);
-    const wcx = cx+nx*wobble, wcy = cy+ny*wobble;
-    const tailP = Math.max(0,p-0.3);
-    const [sx,sy]   = tr.apply([wcx,wcy]);
-    const [stx,sty] = tr.apply([imp.x1+(imp.x2-imp.x1)*tailP,imp.y1+(imp.y2-imp.y1)*tailP]);
-    const alpha = p < 0.88 ? 1 : (1-p)/0.12;
-    const k = tr.k;
-
-    ictx.save();
-    strokeGlow(stx,sty,sx,sy,imp.color,1.2,alpha,k);
-
-    // Core orb — layered circles, no shadowBlur
-    const orb = ictx.createRadialGradient(sx,sy,0,sx,sy,7*k);
-    orb.addColorStop(0,'#fff'); orb.addColorStop(0.4,imp.color); orb.addColorStop(1,'transparent');
-    ictx.globalAlpha = alpha; ictx.fillStyle = orb;
-    ictx.beginPath(); ictx.arc(sx,sy,7*k,0,Math.PI*2); ictx.fill();
-
-    ictx.restore();
-
-    if (p > 0.87 && !imp.bloomed) {
-      imp.bloomed = true;
-      activeImpulses.push({type:'bloom',x:imp.x2,y:imp.y2,color:imp.color,elapsed:0,duration:320});
-    }
-    imp.elapsed += 16;
-  }
-  rafId = activeImpulses.length > 0 ? requestAnimationFrame(rafLoop) : null;
-}
-
-// ── State ───────────────────────────────────────────────────────────────────
 let nodes = [], links = [], nodeById = new Map();
 let sim, link, node, selected = null;
 let userColor = {};
-const USER_PALETTES = ['blue','pink','teal','purple','amber'];
+let userCenters = {};
+const USER_PALETTES = [
+  ['#3b82f6', '#60a5fa', '#93c5fd'], // Blue
+  ['#ec4899', '#f472b6', '#fbcfe8'], // Pink
+  ['#f59e0b', '#fbbf24', '#fcd34d'], // Amber
+  ['#8b5cf6', '#a78bfa', '#c4b5fd'], // Violet
+  ['#06b6d4', '#22d3ee', '#67e8f9'], // Cyan
+];
 
 function getNodeColor(n) {
-  if (n.visibility === 'shared') return NODE_COLORS.emerald;
-  if (n.isContext) return NODE_COLORS.purple;
-  if (n.isHub) return NODE_COLORS.amber;
-  return NODE_COLORS[userColor[n.user_id] || 'blue'] || NODE_COLORS.blue;
+  if (n.visibility === 'shared') return '#10b981'; // Emerald for shared
+  if (n.isContext) return '#8b5cf6';             // Purple for context
+  if (n.isHub) return '#fbbf24';                 // Amber for hubs
+  if (n.user_id) {
+    return userColor[n.user_id] || '#94a3b8';
+  }
+  return '#94a3b8';
+}
+
+function getUserStroke(n) {
+  if (n.visibility === 'shared') return '#10b981';
+  return userColor[n.user_id] || '#94a3b8';
 }
 
 function nodeRadius(n) {
-  const d = n._degree || 0;
-  if (n.isContext || n.isHub) return 12 + Math.sqrt(d) * 10;
-  return 5 + Math.sqrt(d) * 4 + (n.strength||0) * 2;
+  if (n.isContext) return 12 + n.access_count * 0.3;
+  if (n.isHub) return 14 + n.importance * 8;
+  return 4 + n.strength * 12 + Math.min(n.access_count, 15) * 0.2;
 }
 
-function fireImpulse(x1,y1,x2,y2,filterName,duration) {
-  if (activeImpulses.length >= MAX_IMPULSES) return;
-  activeImpulses.push({ x1,y1,x2,y2, color:IMPULSE_COLORS[filterName]??'#fff', duration, elapsed:0, phase:Math.random()*Math.PI*2, bloomed:false });
-  if (!rafId) rafId = requestAnimationFrame(rafLoop);
+function linkColor(type) {
+  return { abstraction:'#fbbf24', causal:'#f97316', semantic:'#38bdf8', temporal:'#4ade80', episodic:'#c084fc' }[type] ?? '#444';
 }
 
-function fireImpulsesFrom(d, burstCount=1) {
-  links.forEach(l => {
-    const sid = l.source.id??l.source, tid = l.target.id??l.target;
-    if (sid!==d.id && tid!==d.id) return;
-    const src = nodeById.get(sid), tgt = nodeById.get(tid);
-    if (!src||!tgt) return;
-    const out = sid===d.id;
-    const [x1,y1,x2,y2] = out ? [src.x,src.y,tgt.x,tgt.y] : [tgt.x,tgt.y,src.x,src.y];
-    const filter = LINK_FILTERS[l.type]??'iglow-white';
-    for (let i=0; i<burstCount; i++) setTimeout(()=>fireImpulse(x1,y1,x2,y2,filter,480+Math.random()*220), i*110);
-  });
-}
-
-// ── Zoom ────────────────────────────────────────────────────────────────────
-const zoom = d3.zoom().scaleExtent([0.04,5]).on('zoom', e => container.attr('transform', e.transform));
-svg.call(zoom);
-
-function zoomToFit(duration=1000) {
-  const nucleus = nodes.reduce((a,b) => (b._degree||0) > (a._degree||0) ? b : a, nodes[0]);
-  if (!nucleus || nucleus.x == null) return;
-  const scale = 0.7;
-  const tx = W/2 - scale * nucleus.x;
-  const ty = H/2 - scale * nucleus.y;
-  svg.transition().duration(duration).ease(d3.easeCubicInOut)
-    .call(zoom.transform, d3.zoomIdentity.translate(tx,ty).scale(scale));
-}
-
-// ── Simulation ──────────────────────────────────────────────────────────────
 sim = d3.forceSimulation()
-  .force('link',    d3.forceLink().id(d=>d.id).distance(d => 80 + nodeRadius(d.source) + nodeRadius(d.target)).strength(0.3))
-  .force('charge',  d3.forceManyBody().strength(d => -(500 + nodeRadius(d)*12)))
-  .force('center',  d3.forceCenter(W/2, H/2))
-  .force('collide', d3.forceCollide().radius(d=>nodeRadius(d)+35).strength(0.9));
+  .force('link', d3.forceLink().id(d => d.id).distance(d => {
+    const s = nodeById.get(d.source.id ?? d.source);
+    const t = nodeById.get(d.target.id ?? d.target);
+    if (s?.visibility === 'shared' || t?.visibility === 'shared') return 100;
+    return (s?.user_id === t?.user_id) ? 60 : 180;
+  }))
+  .force('charge', d3.forceManyBody().strength(d => (d.isContext || d.isHub) ? -500 : -100))
+  .force('center', d3.forceCenter(W/2, H/2))
+  .force('x', d3.forceX(d => {
+    if (d.visibility === 'shared') return W/2;
+    if (!d.user_id) return W/2;
+    return userCenters[d.user_id]?.x ?? W/2;
+  }).strength(0.15))
+  .force('y', d3.forceY(d => {
+    if (d.visibility === 'shared') return H/2;
+    if (!d.user_id) return H/2;
+    return userCenters[d.user_id]?.y ?? H/2;
+  }).strength(0.05))
+  .force('collide', d3.forceCollide().radius(d => nodeRadius(d) + 10));
 
-let fitDone = false;
+const zoom = d3.zoom().scaleExtent([0.05, 5]).on('zoom', e => container.attr('transform', e.transform));
+svg.call(zoom);
+svg.call(zoom.transform, d3.zoomIdentity.translate(W/2, H/2).scale(0.6).translate(-W/2, -H/2));
 
-// ── Highlight ───────────────────────────────────────────────────────────────
 function highlight(d) {
-  const ids = new Set([d.id]);
-  links.forEach(l => { if(l.source.id===d.id) ids.add(l.target.id); if(l.target.id===d.id) ids.add(l.source.id); });
-  node.classed('dimmed', n=>!ids.has(n.id)).classed('selected', n=>n.id===d.id);
-  link.classed('dimmed', l=>l.source.id!==d.id&&l.target.id!==d.id);
-  link.classed('highlighted', l=>l.source.id===d.id||l.target.id===d.id);
-  const p = document.getElementById('info-panel');
-  p.style.display = 'block';
-  document.getElementById('info-label').textContent = d.label;
-  document.getElementById('info-owner').textContent = d.user_id || '—';
-  document.getElementById('info-strength').textContent = (d.strength??0).toFixed(3);
-  document.getElementById('info-importance').textContent = (d.importance??0).toFixed(3);
-  document.getElementById('info-access').textContent = d.access_count??0;
-  document.getElementById('info-last').textContent = d.last_accessed_at ? new Date(d.last_accessed_at*1000).toLocaleDateString() : '—';
-  document.getElementById('info-contexts').innerHTML = (d.contexts||[]).map(c=>\`<span class="ctx-tag">\${c}</span>\`).join('');
-  fireImpulsesFrom(d, 3);
-}
-
-// ── WebSocket ───────────────────────────────────────────────────────────────
-function connectWS() {
-  const proto = window.location.protocol==='https:' ? 'wss:' : 'ws:';
-  const ws = new WebSocket(\`\${proto}//\${window.location.host}\`);
-  ws.onmessage = e => {
-    const msg = JSON.parse(e.data);
-    if (msg.type==='graph') updateGraph(msg.data);
-    if (msg.type==='highlight') msg.ids.forEach(id => { const d=nodeById.get(id); if(d) fireImpulsesFrom(d,3); });
-  };
-  ws.onerror = () => ws.close();
-  ws.onclose = () => setTimeout(connectWS, 2000);
-}
-
-// ── Update graph ─────────────────────────────────────────────────────────────
-function updateGraph(data) {
-  const users = [...new Set(data.nodes.map(n=>n.user_id).filter(Boolean))];
-  users.forEach((u,i) => { if (!userColor[u]) userColor[u] = USER_PALETTES[i%USER_PALETTES.length]; });
-
-  const oldNodes = new Map(nodes.map(n=>[n.id,n]));
-  nodes = data.nodes.map(n => Object.assign(oldNodes.get(n.id)||{x:W/2,y:H/2}, n));
-  links = data.links;
-  nodeById = new Map(nodes.map(n=>[n.id,n]));
-
-  // Degree centrality — drives node size
-  nodes.forEach(n => n._degree = 0);
+  const connectedIds = new Set([d.id]);
   links.forEach(l => {
-    const sid = l.source.id??l.source, tid = l.target.id??l.target;
-    const s = nodeById.get(sid), t = nodeById.get(tid);
-    if (s) s._degree = (s._degree||0) + 1;
-    if (t) t._degree = (t._degree||0) + 1;
+    const sid = l.source.id ?? l.source;
+    const tid = l.target.id ?? l.target;
+    if (sid === d.id) connectedIds.add(tid);
+    if (tid === d.id) connectedIds.add(sid);
+  });
+  node.classed('dimmed', n => !connectedIds.has(n.id));
+  node.classed('hovered', n => n.id === d.id);
+  link.classed('dimmed', l => (l.source.id??l.source)!==d.id && (l.target.id??l.target)!==d.id);
+  link.classed('highlighted', l => (l.source.id??l.source)===d.id || (l.target.id??l.target)===d.id);
+
+  const panel = document.getElementById('info-panel');
+  panel.style.display = 'block';
+  document.getElementById('info-label').textContent = d.isContext ? d.contextName : (d.isHub ? d.label.replace('concept:','') : d.label);
+  document.getElementById('info-owner').textContent = d.user_id ? d.user_id.slice(0,8) + '...' : 'System';
+  document.getElementById('info-strength').textContent = d.strength.toFixed(3);
+  document.getElementById('info-importance').textContent = (d.importance || 0.5).toFixed(3);
+  document.getElementById('info-access').textContent = d.access_count;
+  document.getElementById('info-last').textContent = new Date(d.last_accessed_at).toLocaleDateString();
+  document.getElementById('info-contexts').innerHTML = d.contexts.map(c => '<span class="ctx-tag">' + c + '</span>').join('') || '<span style="color:#444">none</span>';
+  
+  const vis = document.getElementById('info-visibility');
+  vis.innerHTML = \`<span class="visibility-tag vis-\${d.visibility}">\${d.visibility}</span>\`;
+}
+
+function clearHighlight() {
+  node.classed('dimmed hovered selected', false);
+  link.classed('dimmed highlighted', false);
+  document.getElementById('info-panel').style.display = 'none';
+  selected = null;
+}
+
+async function update() {
+  const data = await fetch('/api/graph').then(r => r.json());
+  const { nodes: newNodes, links: newLinks } = data;
+
+  // Identify users and assign centers/colors
+  const userIds = Array.from(new Set(newNodes.filter(n => n.user_id).map(n => n.user_id)));
+  userIds.forEach((uid, i) => {
+    if (!userColor[uid]) {
+      userColor[uid] = USER_PALETTES[i % USER_PALETTES.length][0];
+      // Position users in a circle or line
+      const angle = (i / userIds.length) * Math.PI * 2;
+      const radius = W * 0.3;
+      userCenters[uid] = {
+        x: W/2 + Math.cos(angle) * radius,
+        y: H/2 + Math.sin(angle) * radius * 0.5
+      };
+      // For exactly two brains, use left and right
+      if (userIds.length === 2) {
+        userCenters[userIds[0]] = { x: W * 0.2, y: H/2 };
+        userCenters[userIds[1]] = { x: W * 0.8, y: H/2 };
+        document.getElementById('user-a-label').textContent = 'BRAIN ' + userIds[0].slice(-4);
+        document.getElementById('user-b-label').textContent = 'BRAIN ' + userIds[1].slice(-4);
+      } else {
+        document.getElementById('user-a-label').style.display = 'none';
+        document.getElementById('user-b-label').style.display = 'none';
+      }
+
+      d3.select('#legend-users').append('div').attr('class','row').html(
+        \`<div class="swatch" style="background:\${userColor[uid]}"></div><span>User \${uid.slice(0,6)}</span>\`
+      );
+    }
   });
 
-  link = gLinks.selectAll('.link').data(links)
-    .join('line')
-    .attr('class', d=>'link link-'+d.type)
-    .attr('stroke', d=>LINK_COLORS[d.type]??'#1e3a5f')
-    .attr('stroke-width', d=>0.8+(d.weight||0.5)*1.2)
-    .attr('stroke-opacity', 0.55)
-    .attr('filter', d=>{ const f=LINK_FILTERS[d.type]; return f?'url(#'+f+')':null; });
+  const oldNodeById = nodeById;
+  nodeById = new Map();
+  nodes = newNodes.map(nn => {
+    const existing = oldNodeById.get(nn.id);
+    if (existing) {
+      if (nn.last_fired_at > (existing.last_fired_at || 0)) existing._shouldSpike = true;
+      Object.assign(existing, nn);
+      nodeById.set(nn.id, existing);
+      return existing;
+    } else {
+      nn.x = W/2 + (Math.random()-0.5)*200;
+      nn.y = H/2 + (Math.random()-0.5)*200;
+      nn._isNew = true;
+      nodeById.set(nn.id, nn);
+      return nn;
+    }
+  });
 
-  node = gNodes.selectAll('.node').data(nodes, d=>d.id)
-    .join(enter => {
-      const g = enter.append('g').attr('class','node').style('opacity',0);
-      g.append('circle').attr('class','aura');
-      g.append('circle').attr('class','soma');
-      g.append('text').attr('text-anchor','middle');
-      g.transition().duration(700).delay((_,i)=>i*6).style('opacity',1);
-      return g;
-    })
+  links = newLinks.map(nl => {
+    const existing = links.find(l => (l.source.id || l.source) === nl.source && (l.target.id || l.target) === nl.target);
+    return existing ? Object.assign(existing, nl) : nl;
+  });
+
+  link = gLinks.selectAll('.link').data(links, d => \`\${d.source.id || d.source}-\${d.target.id || d.target}\`)
+    .join('line').attr('class','link')
+    .attr('stroke', d => linkColor(d.type))
+    .attr('stroke-width', d => Math.max(1.5, d.weight * 4));
+
+  node = gNodes.selectAll('.node').data(nodes, d => d.id)
+    .join(
+      enter => {
+        const g = enter.append('g').attr('class','node').attr('id', d => \`node-\${d.id}\`);
+        g.append('circle');
+        g.append('text');
+        return g;
+      },
+      update => update,
+      exit => exit.transition().duration(500).style('opacity', 0).remove()
+    )
     .call(d3.drag()
-      .on('start',(e,d)=>{ if(!e.active) sim.alphaTarget(0.3).restart(); d.fx=d.x; d.fy=d.y; })
-      .on('drag', (e,d)=>{ d.fx=e.x; d.fy=e.y; })
-      .on('end',  (e,d)=>{ if(!e.active) sim.alphaTarget(0); d.fx=null; d.fy=null; }))
-    .on('click',      (event,d)=>{ event.stopPropagation(); selected=d; highlight(d); })
-    .on('mouseenter', (e,d)=>d3.select(e.currentTarget).classed('hovered',true))
-    .on('mouseleave', (e,d)=>d3.select(e.currentTarget).classed('hovered',false));
+      .on('start', (e,d) => { if(!e.active) sim.alphaTarget(0.2).restart(); d.fx=d.x; d.fy=d.y; })
+      .on('drag',  (e,d) => { d.fx=e.x; d.fy=e.y; })
+      .on('end',   (e,d) => { if(!e.active) sim.alphaTarget(0); d.fx=null; d.fy=null; }));
 
-  const r = d=>nodeRadius(d), c = d=>getNodeColor(d);
-  node.select('.aura').attr('r', d=>r(d)*2.4).attr('fill','none').attr('stroke',c).attr('stroke-width',1.5).attr('stroke-opacity',0.2);
-  node.select('.soma').attr('r', r).attr('fill', c).attr('filter','url(#node-glow)');
-  node.select('text').attr('dy', d=>r(d)+15).text(d=>d.label);
+  node.select('circle')
+    .attr('r', d => nodeRadius(d))
+    .attr('fill', d => getNodeColor(d) + '44')
+    .attr('stroke', 'none')
+    .attr('stroke-width', 0)
+    .attr('filter', d => {
+        if (d.visibility === 'shared') return 'url(#glow-emerald)';
+        const uid = d.user_id;
+        const paletteIndex = Array.from(new Set(nodes.map(n => n.user_id))).indexOf(uid);
+        const glowNames = ['blue','purple','orange','green','white','emerald'];
+        return \`url(#glow-\${glowNames[paletteIndex % glowNames.length]})\`;
+    });
+
+  node.select('text')
+    .attr('dy', d => -(nodeRadius(d) + 5))
+    .attr('text-anchor','middle')
+    .text(d => d.isContext ? d.contextName : d.label);
+
+  node.on('mouseenter', (e,d) => { if (!selected) highlight(d); })
+      .on('mouseleave', () => { if (!selected) clearHighlight(); })
+      .on('click', (e,d) => {
+        e.stopPropagation();
+        if (selected === d.id) { clearHighlight(); return; }
+        selected = d.id;
+        node.classed('selected', n => n.id === d.id);
+        highlight(d);
+      });
+
+  nodes.forEach(n => {
+    if (n._isNew || n._shouldSpike) {
+      const el = gNodes.select(\`#node-\${n.id}\`).select('circle');
+      if (el.empty()) return;
+      const baseR = nodeRadius(n);
+      const color = getNodeColor(n);
+      const stroke = getUserStroke(n);
+      el.interrupt()
+        .attr('r', baseR * 1.5)
+        .attr('fill', color)
+        .attr('stroke', '#ffffff').attr('stroke-width', 6).attr('filter', 'url(#glow-white)')
+        .transition().duration(n._isNew ? 1000 : 600).ease(d3.easeQuadOut)
+        .attr('r', baseR)
+        .attr('fill', color + '44')
+        .attr('stroke', 'none').attr('stroke-width', 0)
+        .attr('filter', n.visibility === 'shared' ? 'url(#glow-emerald)' : (
+          () => {
+             const uid = n.user_id;
+             const paletteIndex = Array.from(new Set(nodes.map(node => node.user_id))).indexOf(uid);
+             const glowNames = ['blue','purple','orange','green','white','emerald'];
+             return \`url(#glow-\${glowNames[paletteIndex % glowNames.length]})\`;
+          }
+        )());
+      // Pulse connected links
+      gLinks.selectAll('.link')
+        .filter(l => (l.source.id || l.source) === n.id || (l.target.id || l.target) === n.id)
+        .interrupt()
+        .classed('firing', true)
+        .transition().duration(n._isNew ? 1200 : 800)
+        .on('end', function() { d3.select(this).classed('firing', false); });
+
+      n._isNew = false; n._shouldSpike = false;
+    }
+  });
 
   sim.nodes(nodes);
   sim.force('link').links(links);
-  sim.alpha(0.5).restart();
-  if (!fitDone) {
-    sim.on('end.fit', ()=>{ fitDone=true; zoomToFit(); sim.on('end.fit',null); });
-    setTimeout(()=>{ if(!fitDone){ fitDone=true; zoomToFit(); } }, 3000);
-  }
+  sim.alpha(0.05).restart();
 }
 
 sim.on('tick', () => {
-  if (link) link.attr('x1',d=>d.source.x).attr('y1',d=>d.source.y).attr('x2',d=>d.target.x).attr('y2',d=>d.target.y);
-  if (node) node.attr('transform', d=>\`translate(\${d.x},\${d.y})\`);
+  if (!link || !node) return;
+  link.attr('x1',d=>d.source.x).attr('y1',d=>d.source.y)
+      .attr('x2',d=>d.target.x).attr('y2',d=>d.target.y);
+  node.attr('transform', d => \`translate(\${d.x},\${d.y})\`);
 });
 
-svg.on('click', ()=>{
-  if (node) node.classed('dimmed',false).classed('selected',false);
-  if (link) { link.classed('dimmed',false); link.classed('highlighted',false); }
-  document.getElementById('info-panel').style.display = 'none';
-  selected = null;
+svg.on('click', clearHighlight);
+document.getElementById('search-input').addEventListener('input', e => {
+  const q = e.target.value.toLowerCase().trim();
+  if (!q) { node.classed('dimmed', false); link.classed('dimmed', false); return; }
+  node.classed('dimmed', n => !n.label.toLowerCase().includes(q));
+  link.classed('dimmed', true);
 });
 
-connectWS();
-`;
-}
-
-function renderBrain(): string {
-  return `<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<title>Memory Brain Cluster</title>
-<style>${renderStyles()}</style>
-</head>
-<body>
-<div id="svg-container"><svg id="graph"></svg></div>
-
-<div id="nav">
-  <span class="title">CORTICAL CORE</span>
-  <span class="status">Neural Socket Active</span>
-</div>
-${renderInfoPanel()}
-${renderLegend()}
-<script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js"></script>
-<script>${renderD3Script()}</script>
+update();
+setInterval(update, 2000);
+</script>
 </body>
 </html>`;
 }
 
-// --- Route handlers ---
-
-async function handleGetGraph(res: http.ServerResponse) {
-  json(res, await buildGraphData());
-}
-
-async function handleDeleteNode(res: http.ServerResponse, body: any) {
-  await withJson(res, () => deleteNode(body.id));
-}
-
-const POST_ROUTES: Record<string, (res: http.ServerResponse, body: any) => Promise<void>> = {
-  "/delete-node": handleDeleteNode,
-};
 
 const server = http.createServer(async (req, res) => {
   const url = req.url ?? "/";
+
   if (req.method === "GET" && url === "/") {
     res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
     res.end(renderBrain());
     return;
   }
+
   if (req.method === "GET" && url === "/api/graph") {
-    await handleGetGraph(res);
+    json(res, await buildGraphData());
     return;
   }
+
   if (req.method === "POST") {
-    const handler = POST_ROUTES[url];
-    if (handler) {
-      const body = await readBody(req);
-      await handler(res, body);
+    const body = await readBody(req);
+
+    if (url === "/delete-node") {
+      try { await deleteNode(body.id); json(res, { ok: true }); }
+      catch (e: any) { json(res, { ok: false, error: e.message }); }
+      return;
+    }
+
+    if (url === "/delete-edge") {
+      try { await deleteEdge(body.from_id, body.to_id); json(res, { ok: true }); }
+      catch (e: any) { json(res, { ok: false, error: e.message }); }
+      return;
+    }
+
+    if (url === "/rename") {
+      try { await renameNode(body.id, body.label); json(res, { ok: true }); }
+      catch (e: any) { json(res, { ok: false, error: e.message }); }
+      return;
+    }
+
+    if (url === "/merge") {
+      try {
+        await rewireEdges(body.delete_id, body.keep_id);
+        await deleteNode(body.delete_id);
+        json(res, { ok: true });
+      } catch (e: any) { json(res, { ok: false, error: e.message }); }
       return;
     }
   }
+
   res.writeHead(404);
   res.end();
 });
@@ -644,47 +647,3 @@ const server = http.createServer(async (req, res) => {
 server.listen(PORT, "127.0.0.1", () => {
   console.log(`Memory Review → http://localhost:${PORT}`);
 });
-
-const wss = new WebSocketServer({ server });
-
-function broadcast(data: any) {
-  const message = JSON.stringify({ type: "graph", data });
-  wss.clients.forEach((client) => {
-    if (client.readyState === WebSocket.OPEN) client.send(message);
-  });
-}
-
-function broadcastHighlight(ids: string[]) {
-  const message = JSON.stringify({ type: "highlight", ids });
-  wss.clients.forEach((client) => {
-    if (client.readyState === WebSocket.OPEN) client.send(message);
-  });
-}
-
-wss.on("connection", async (ws) => {
-  const data = await buildGraphData();
-  ws.send(JSON.stringify({ type: "graph", data }));
-});
-
-let lastHash = "";
-let lastFiredMap = new Map<string, number | null>();
-
-setInterval(async () => {
-  try {
-    const data = await buildGraphData();
-    const currentHash = JSON.stringify(data);
-
-    const newlyFired: string[] = [];
-    for (const n of data.nodes) {
-      const prev = lastFiredMap.get(n.id);
-      if (n.last_fired_at && n.last_fired_at !== prev) newlyFired.push(n.id);
-      lastFiredMap.set(n.id, n.last_fired_at ?? null);
-    }
-
-    if (currentHash !== lastHash) {
-      lastHash = currentHash;
-      broadcast(data);
-    }
-    if (newlyFired.length > 0) broadcastHighlight(newlyFired);
-  } catch (e) {}
-}, 2000);

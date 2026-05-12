@@ -75,10 +75,10 @@ export async function findOrCreateNode(
   const db = await getDb();
   const now = Date.now();
 
-  // Search for the node by label. If label uniqueness is enforced, we must find it regardless of visibility/user
+  // Search for the node by label within the user's context or shared nodes
   let existing = await db.queryGet(
-    "SELECT * FROM nodes WHERE label = ?", 
-    [label]
+    "SELECT * FROM nodes WHERE label = ? AND (user_id = ? OR visibility = 'shared')", 
+    [label, userId]
   );
   
   if (existing) {
@@ -183,6 +183,38 @@ export async function upsertEdge(
   }
 
   return { from_id: a, to_id: b, weight: 0.5, type: type as any, co_occurrences: 1, created_at: now, last_reinforced_at: now, user_id: userId };
+}
+
+export async function rewireEdges(fromId: string, toId: string): Promise<void> {
+  const db = await getDb();
+  const edges = await db.queryAll("SELECT * FROM edges WHERE from_id = ? OR to_id = ?", [fromId, fromId]);
+  const DB_TYPE = (process.env.DB_TYPE || "").trim() === "mysql" ? "mysql" : "sqlite";
+
+  for (const e of edges) {
+    const src = e.from_id === fromId ? toId : e.from_id;
+    const dst = e.to_id   === fromId ? toId : e.to_id;
+    if (src === dst) continue;
+    const [a, b] = src < dst ? [src, dst] : [dst, src];
+
+    if (DB_TYPE === "mysql") {
+      await db.run(`
+        INSERT INTO edges (from_id, to_id, weight, type, co_occurrences, created_at, last_reinforced_at, user_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON DUPLICATE KEY UPDATE
+          weight = LEAST(1.0, weight + VALUES(weight)),
+          co_occurrences = co_occurrences + VALUES(co_occurrences)
+      `, [a, b, e.weight, e.type, e.co_occurrences, e.created_at, e.last_reinforced_at, e.user_id]);
+    } else {
+      await db.run(`
+        INSERT INTO edges (from_id, to_id, weight, type, co_occurrences, created_at, last_reinforced_at, user_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(from_id, to_id) DO UPDATE SET
+          weight = MIN(1.0, weight + excluded.weight),
+          co_occurrences = co_occurrences + excluded.co_occurrences
+      `, [a, b, e.weight, e.type, e.co_occurrences, e.created_at, e.last_reinforced_at, e.user_id]);
+    }
+  }
+  await db.run("DELETE FROM edges WHERE from_id = ? OR to_id = ?", [fromId, fromId]);
 }
 
 export async function updateEdgeWeight(fromId: string, toId: string, weight: number): Promise<void> {

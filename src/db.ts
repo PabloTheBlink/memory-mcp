@@ -120,7 +120,7 @@ class SqliteAdapter implements DBAdapter {
   }
 
   async setMeta(key: string, value: string): Promise<void> {
-    this.db!.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)").run(key, value);
+    this.db!.prepare("INSERT OR REPLACE INTO meta (`key`, value) VALUES (?, ?)").run(key, value);
   }
 }
 
@@ -220,15 +220,10 @@ class MysqlAdapter implements DBAdapter {
   private convertSql(sql: string): string {
     let converted = sql
       .replace(/INSERT OR REPLACE INTO/g, "REPLACE INTO")
-      .replace(/INSERT INTO meta \(`key`, value\) VALUES \(\?, \?\) ON DUPLICATE KEY UPDATE value = VALUES\(value\)/g, "INSERT INTO meta (`key`, value) VALUES (?, ?) ON DUPLICATE KEY UPDATE value = VALUES(value)") // already handled
-      .replace(/ON CONFLICT\((.*?)\) DO UPDATE SET/g, "ON DUPLICATE KEY UPDATE");
-    
-    // MySQL uses different parameter syntax for ON DUPLICATE KEY UPDATE in some drivers, 
-    // but with execute() and standard SQL it should work.
-    // One specific fix for upsertEdge: 
-    // SQLite: weight = (weight * 0.7) + (? * 0.3)
-    // MySQL: weight = (weight * 0.7) + (VALUES(weight) * 0.3) 
-    // However, since we pass the params again at the end of the array, it should be fine.
+      .replace(/INSERT INTO meta \(`key`, value\) VALUES \(\?, \?\) ON DUPLICATE KEY UPDATE value = VALUES\(value\)/g, "INSERT INTO meta (`key`, value) VALUES (?, ?) ON DUPLICATE KEY UPDATE value = VALUES(value)") 
+      .replace(/ON CONFLICT\((.*?)\) DO UPDATE SET/g, "ON DUPLICATE KEY UPDATE")
+      .replace(/MIN\((.*?,.*?)\)/gi, "LEAST($1)")
+      .replace(/MAX\((.*?,.*?)\)/gi, "GREATEST($1)");
     
     return converted;
   }

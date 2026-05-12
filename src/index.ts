@@ -50,12 +50,19 @@ const EMBEDDING_MODEL_ID = "Xenova/all-MiniLM-L6-v2";
 
 async function runReindexingIfNeeded() {
   const storedModel = await getMeta("embedding_model");
-  if (storedModel === EMBEDDING_MODEL_ID) return;
+  const allNodes = await getAllNodes();
+  const nodesToFix = allNodes.filter(n => n.embedding === null);
 
-  process.stderr.write(`Re-indexing memory: switching from ${storedModel || "unknown"} to ${EMBEDDING_MODEL_ID}...\n`);
+  if (storedModel === EMBEDDING_MODEL_ID && nodesToFix.length === 0) return;
 
-  const nodes = await getAllNodes(); // Re-indexing needs to touch everything
-  process.stderr.write(`Re-indexing ${nodes.length} nodes...\n`);
+  if (storedModel !== EMBEDDING_MODEL_ID) {
+    process.stderr.write(`Re-indexing memory: switching from ${storedModel || "unknown"} to ${EMBEDDING_MODEL_ID}...\n`);
+  } else if (nodesToFix.length > 0) {
+    process.stderr.write(`Fixing ${nodesToFix.length} nodes with missing embeddings...\n`);
+  }
+
+  const nodes = (storedModel !== EMBEDDING_MODEL_ID) ? allNodes : nodesToFix;
+  process.stderr.write(`Processing ${nodes.length} nodes...\n`);
   
   const CHUNK_SIZE = 20;
   for (let i = 0; i < nodes.length; i += CHUNK_SIZE) {

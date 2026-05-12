@@ -9,11 +9,23 @@
  *   4. Orphan pruning — isolated nodes with low strength not seen recently
  */
 
-import { getAllNodes, getAllEdges, getDb, upsertEdge, deleteNode, setMeta, getMeta } from "./graph";
-import { cosineSimilarity } from "./embeddings";
+import { 
+  getAllNodes, 
+  getAllEdges, 
+  getDb, 
+  upsertEdge, 
+  deleteNode, 
+  setMeta, 
+  getMeta, 
+  rewireEdges,
+  updateNodeImportance,
+  findOrCreateNode as createNode,
+  updateNodeEmbedding
+} from "./graph";
+import { cosineSimilarity, getEmbedding } from "./embeddings";
 import { consolidate } from "./decay";
 
-const SEMANTIC_LINK_THRESHOLD  = 0.78;  // create edge if no edge exists
+const SEMANTIC_LINK_THRESHOLD  = 0.72;  // create edge if no edge exists (lowered from 0.78)
 const SYNONYM_LINK_THRESHOLD   = 0.95;  // very strong link for synonyms/translations
 const AUTO_MERGE_EMB_THRESHOLD = 0.98;  // merge if embedding sim this high...
 const AUTO_MERGE_TEXT_THRESHOLD = 0.70; // ...AND text sim this high
@@ -39,29 +51,6 @@ function textSimilarity(a: string, b: string): number {
   return 1 - levenshtein(la, lb) / Math.max(la.length, lb.length);
 }
 
-async function hasEdge(fromId: string, toId: string): Promise<boolean> {
-  const [a, b] = fromId < toId ? [fromId, toId] : [toId, fromId];
-  const db = await getDb();
-  const row = await db.queryGet("SELECT 1 FROM edges WHERE from_id = ? AND to_id = ?", [a, b]);
-  return !!row;
-}
-
-async function rewireEdges(fromId: string, toId: string): Promise<void> {
-  const db = await getDb();
-  const edges = await db.queryAll("SELECT * FROM edges WHERE from_id = ? OR to_id = ?", [fromId, fromId]);
-  for (const e of edges) {
-    const src = e.from_id === fromId ? toId : e.from_id;
-    const dst = e.to_id   === fromId ? toId : e.to_id;
-    if (src === dst) continue;
-    const [a, b] = src < dst ? [src, dst] : [dst, src];
-    const exists = await db.queryGet("SELECT 1 FROM edges WHERE from_id = ? AND to_id = ?", [a, b]);
-    if (!exists) {
-      await db.run(`INSERT INTO edges (from_id,to_id,weight,type,co_occurrences,created_at,last_reinforced_at)
-                  VALUES (?,?,?,?,?,?,?)`, [a, b, e.weight, e.type, e.co_occurrences, e.created_at, e.last_reinforced_at]);
-    }
-  }
-  await db.run("DELETE FROM edges WHERE from_id = ? OR to_id = ?", [fromId, fromId]);
-}
 
 export interface MaintenanceReport {
   skipped?: boolean;
@@ -80,6 +69,7 @@ export interface MaintenanceReport {
 
 export async function runMaintenance(force = false): Promise<MaintenanceReport> {
   const start = Date.now();
+  const now = start; 
   const report: MaintenanceReport = {
     decay: null,
     semanticLinksAdded: 0,
@@ -106,20 +96,40 @@ export async function runMaintenance(force = false): Promise<MaintenanceReport> 
   }
 
   // ── Step 1: Ebbinghaus decay ────────────────────────────────────────────
+  process.stderr.write("[Maintenance] Step 1: Decay...\n");
   report.decay = await consolidate();
 
-  // ── Step 2: Semantic linking & Synonym detection ────────────────────────
-  // After decay, reload nodes (some may have been deleted)
-  const nodes = (await getAllNodes()).filter(n => n.embedding !== null);
+  // Load all nodes and edges into memory for efficient O(N^2) processing
+  let allNodes = await getAllNodes();
+  let allEdges = await getAllEdges();
+  process.stderr.write(`[Maintenance] Loaded ${allNodes.length} nodes and ${allEdges.length} edges.\n`);
+  
+  // Helper for efficient edge lookup
+  const getEdgeKey = (a: string, b: string) => a < b ? `${a}:${b}` : `${b}:${a}`;
+  const edgeSet = new Set(allEdges.map(e => getEdgeKey(e.from_id, e.to_id)));
 
-  for (let i = 0; i < nodes.length; i++) {
-    for (let j = i + 1; j < nodes.length; j++) {
-      const a = nodes[i], b = nodes[j];
+  // ── Step 2: Semantic linking & Synonym detection ────────────────────────
+  process.stderr.write("[Maintenance] Step 2: Semantic linking...\n");
+  const nodesForLinking = allNodes.filter(n => n.embedding !== null);
+
+  for (let i = 0; i < nodesForLinking.length; i++) {
+    if (i % 20 === 0) process.stderr.write(`  Linking progress: ${i}/${nodesForLinking.length}\r`);
+    const a = nodesForLinking[i];
+    
+    for (let j = i + 1; j < nodesForLinking.length; j++) {
+      const b = nodesForLinking[j];
       
       // Only link nodes from the same user or if both are shared
       if (a.user_id !== b.user_id && (a.visibility !== 'shared' || b.visibility !== 'shared')) continue;
       
-      if (await hasEdge(a.id, b.id)) continue;
+      if (edgeSet.has(getEdgeKey(a.id, b.id))) continue;
+
+      // Coarse filter for performance
+      let coarseScore = 0;
+      for (let k = 0; k < 8; k++) {
+        coarseScore += a.embedding![k] * b.embedding![k];
+      }
+      if (coarseScore <= 0) continue;
 
       const sim = cosineSimilarity(a.embedding!, b.embedding!);
       if (sim < SEMANTIC_LINK_THRESHOLD) continue;
@@ -128,7 +138,6 @@ export async function runMaintenance(force = false): Promise<MaintenanceReport> 
       const bIsCtx = b.label.startsWith("[ctx:");
       if (aIsCtx !== bIsCtx) continue; 
 
-      // Language-agnostic detection:
       const textSim = textSimilarity(a.label, b.label);
       const isSynonym = sim >= 0.94 && textSim < 0.3;
 
@@ -136,8 +145,8 @@ export async function runMaintenance(force = false): Promise<MaintenanceReport> 
         ? 0.9 
         : (sim - SEMANTIC_LINK_THRESHOLD) / (1 - SEMANTIC_LINK_THRESHOLD) * 0.4;
 
-      const type = "semantic";
-      await upsertEdge(a.id, b.id, type, weight, a.user_id);
+      await upsertEdge(a.id, b.id, "semantic", weight, a.user_id);
+      edgeSet.add(getEdgeKey(a.id, b.id)); // Update local cache
       
       report.semanticLinksAdded++;
       if (report.newLinks.length < 10) {
@@ -145,12 +154,16 @@ export async function runMaintenance(force = false): Promise<MaintenanceReport> 
       }
     }
   }
+  process.stderr.write(`\n  Semantic linking complete: ${report.semanticLinksAdded} links added.\n`);
 
-  // ── Step 3: Auto-merge near-duplicates (Language Agnostic) ──────────────
-  const nodesForMerge = (await getAllNodes()).filter(n => !n.label.startsWith("[ctx:") && !n.label.startsWith("rule:") && !n.label.startsWith("preference:"));
+  // ── Step 3: Auto-merge near-duplicates ──────────────────────────────────
+  process.stderr.write("[Maintenance] Step 3: Auto-merge...\n");
+  allNodes = await getAllNodes(); 
+  const nodesForMerge = allNodes.filter(n => !n.label.startsWith("[ctx:") && !n.label.startsWith("rule:") && !n.label.startsWith("preference:"));
   const deletedIds = new Set<string>();
 
   for (let i = 0; i < nodesForMerge.length; i++) {
+    if (i % 20 === 0) process.stderr.write(`  Merge progress: ${i}/${nodesForMerge.length}\r`);
     const a = nodesForMerge[i];
     if (deletedIds.has(a.id)) continue;
 
@@ -158,27 +171,31 @@ export async function runMaintenance(force = false): Promise<MaintenanceReport> 
       const b = nodesForMerge[j];
       if (deletedIds.has(b.id)) continue;
       
-      // Only merge nodes from the same user
       if (a.user_id !== b.user_id) continue;
       
       const la = a.label.toLowerCase().trim();
       const lb = b.label.toLowerCase().trim();
 
-      const exactMatch = la === lb;
       const textSim = textSimilarity(a.label, b.label);
+      
+      // Coarse filter
+      let coarseScore = 0;
+      if (a.embedding && b.embedding) {
+        for (let k = 0; k < 8; k++) {
+          coarseScore += a.embedding[k] * b.embedding[k];
+        }
+      }
+      if (coarseScore <= 0 && textSim < 0.8) continue;
+
+      const embSim = (a.embedding && b.embedding) ? cosineSimilarity(a.embedding, b.embedding) : 0;
+
+      const exactMatch = la === lb;
       const textMatch = textSim >= 0.92;
-
-      const embSim = (a.embedding && b.embedding)
-        ? cosineSimilarity(a.embedding, b.embedding)
-        : 0;
-
-      // Language-agnostic merge
       const embMatch = embSim >= 0.94; 
       const mixedMatch = embSim >= 0.88 && textSim >= 0.5; 
 
       if (!exactMatch && !textMatch && !embMatch && !mixedMatch) continue;
 
-      // Keep the one with more history or higher importance
       const aRank = a.access_count * (1 + a.importance);
       const bRank = b.access_count * (1 + b.importance);
       const [keep, del] = aRank >= bRank ? [a, b] : [b, a];
@@ -192,78 +209,80 @@ export async function runMaintenance(force = false): Promise<MaintenanceReport> 
         report.merges.push({ kept: keep.label, deleted: del.label, similarity: Math.round(embSim * 100) / 100 } as any);
       }
 
-      if (del === a) break; // Current 'a' is deleted, move to next 'i'
+      if (del === a) break;
+
     }
   }
+  process.stderr.write(`\n  Auto-merge complete: ${report.autoMerged} nodes merged.\n`);
 
-  // ── Step 4: Islands Auto-Linking (Pre-Pruning) ───────────────────────────
-  // Identify nodes with 0 edges and try to link them.
-  const ISLAND_LINK_THRESHOLD = 0.65; 
+  // ── Step 4: Islands Auto-Linking ─────────────────────────────────────────
+  process.stderr.write("[Maintenance] Step 4: Islands & Weakly Connected...\n");
+  const ISLAND_LINK_THRESHOLD = 0.58; // Lowered from 0.65
   const nodesAfterMerge = await getAllNodes();
-  const allEdgesBeforePrune = await getAllEdges();
-  const connectedIds = new Set(allEdgesBeforePrune.flatMap(e => [e.from_id, e.to_id]));
+  allEdges = await getAllEdges();
   
+  const neighborCounts = new Map<string, number>();
+  for (const e of allEdges) {
+    neighborCounts.set(e.from_id, (neighborCounts.get(e.from_id) || 0) + 1);
+    neighborCounts.set(e.to_id, (neighborCounts.get(e.to_id) || 0) + 1);
+  }
+
   for (const node of nodesAfterMerge) {
-    if (connectedIds.has(node.id)) continue;
+    const count = neighborCounts.get(node.id) || 0;
+    // Target nodes that are islands (0) or weakly connected (1)
+    if (count >= 2) continue;
     if (node.label.startsWith("[ctx:") || node.label.startsWith("curiosity:") || !node.embedding) continue;
 
-    let bestMatch = null;
-    let highestSim = 0;
+    const matches: Array<{ target: typeof node; sim: number }> = [];
 
     for (const target of nodesAfterMerge) {
       if (target.id === node.id || !target.embedding) continue;
       
       const sim = cosineSimilarity(node.embedding, target.embedding);
-      if (sim > highestSim) {
-        highestSim = sim;
-        bestMatch = target;
+      if (sim >= ISLAND_LINK_THRESHOLD) {
+        matches.push({ target, sim });
       }
     }
 
-    if (bestMatch && highestSim >= ISLAND_LINK_THRESHOLD) {
-      await upsertEdge(node.id, bestMatch.id, "semantic", 0.4, node.user_id);
-      connectedIds.add(node.id);
-      connectedIds.add(bestMatch.id);
+    // Link to top 3 matches to build a more robust graph
+    const topMatches = matches.sort((a, b) => b.sim - a.sim).slice(0, 3);
+    for (const match of topMatches) {
+      await upsertEdge(node.id, match.target.id, "semantic", 0.35, node.user_id);
       report.islandsLinked++;
     }
   }
 
   // ── Step 5: Strict Orphan Pruning ─────────────────────────────────────────
-  const now = Date.now();
-  // Now prune anything that is still not connected.
+  process.stderr.write("[Maintenance] Step 5: Pruning...\n");
+  const finalEdges = await getAllEdges();
+  const finalConnectedIds = new Set(finalEdges.flatMap(e => [e.from_id, e.to_id]));
+  
   for (const n of nodesAfterMerge) {
-    if (connectedIds.has(n.id)) continue;
-    
-    // Protect critical system nodes
+    if (finalConnectedIds.has(n.id)) continue;
+    // Don't prune rules, preferences, or context hubs
     if (n.label.startsWith("rule:") || n.label.startsWith("preference:") || n.label.startsWith("[ctx:")) continue;
-    
-    // If it's very important or very strong, maybe keep it? 
-    // The user was quite explicit: "if they have no relation, eliminate them".
-    // We'll keep very high importance nodes (0.9+) just in case, but prune everything else.
-    if (n.importance >= 0.9) continue;
+    // Don't prune important nodes
+    if (n.importance >= 0.8) continue;
 
     await deleteNode(n.id);
     report.orphansPruned++;
   }
 
-  // ── Build Adjacency Map for Analysis ────────────────────────────────────
-  const allEdgesForAnalysis = await getAllEdges();
+  // ── Step 6: Centrality-based Importance Boost ─────────────────────────────
+  process.stderr.write("[Maintenance] Step 6: Centrality...\n");
+  const nodesAfterPrune = await getAllNodes();
+  const edgesAfterPrune = await getAllEdges();
   const adjacency = new Map<string, string[]>();
-  for (const e of allEdgesForAnalysis) {
+  for (const e of edgesAfterPrune) {
     if (!adjacency.has(e.from_id)) adjacency.set(e.from_id, []);
     if (!adjacency.has(e.to_id))   adjacency.set(e.to_id,   []);
     adjacency.get(e.from_id)!.push(e.to_id);
     adjacency.get(e.to_id)!.push(e.from_id);
   }
 
-  // ── Step 5: Centrality-based Importance Boost (Human focus) ─────────────
-  const { updateNodeImportance } = require("./graph");
-  const nodesAfterPrune = await getAllNodes();
-
   for (const node of nodesAfterPrune) {
     const neighbors = adjacency.get(node.id) ?? [];
     if (neighbors.length >= 3) {
-      // Human focus: things connected to many things become more important automatically.
       const centralityBoost = Math.min(0.2, neighbors.length * 0.02);
       const newImportance = Math.min(1.0, (node.importance || 0.5) + centralityBoost);
       if (newImportance > (node.importance || 0.5) + 0.01) {
@@ -272,8 +291,9 @@ export async function runMaintenance(force = false): Promise<MaintenanceReport> 
     }
   }
 
-  // ── Step 6: Conceptual Abstraction (LTP & Chunking) ─────────────────────
-  // Detect dense clusters of nodes and create a "concept" node representing them.
+  // ── Step 7: Conceptual Abstraction ───────────────────────────────────────
+  process.stderr.write("[Maintenance] Step 7: Abstraction...\n");
+  const nodesMap = new Map(nodesAfterPrune.map(n => [n.id, n]));
   const coreNodes = nodesAfterPrune.filter(n => !n.label.startsWith("[") && !n.label.startsWith("concept:"));
   const processedForChunk = new Set<string>();
 
@@ -281,11 +301,10 @@ export async function runMaintenance(force = false): Promise<MaintenanceReport> 
     if (processedForChunk.has(node.id)) continue;
     
     const neighbors = (adjacency.get(node.id) ?? [])
-      .map(id => nodesAfterPrune.find(n => n.id === id))
+      .map(id => nodesMap.get(id))
       .filter((n): n is NonNullable<typeof n> => !!n && !n.label.startsWith("concept:"));
 
     if (neighbors.length >= 3) {
-      // Potential cluster: check internal density (clique-ish)
       const cluster = [node, ...neighbors];
       const clusterIds = new Set(cluster.map(c => c.id));
       
@@ -298,12 +317,9 @@ export async function runMaintenance(force = false): Promise<MaintenanceReport> 
       internalEdges /= 2;
 
       const possibleEdges = (cluster.length * (cluster.length - 1)) / 2;
-      // If cluster is > 60% dense, it's a concept.
       if (internalEdges / possibleEdges >= 0.60) {
         const sorted = cluster.sort((a, b) => (b.importance || 0) - (a.importance || 0));
         const hubLabel = `concept:${sorted[0].label} & others`;
-        
-        const { findOrCreateNode: createNode } = require("./graph");
         const hub = await createNode(hubLabel, null, 0.7, null, sorted[0].user_id, "shared"); 
         
         for (const member of cluster) {
@@ -317,9 +333,10 @@ export async function runMaintenance(force = false): Promise<MaintenanceReport> 
     }
   }
 
-  // ── Step 7: Conflict Detection (Heuristic) ───────────────────────────────
+  // ── Step 8: Conflict Detection ───────────────────────────────────────────
+  process.stderr.write("[Maintenance] Step 8: Conflict Detection...\n");
   const NEGATION_WORDS = new Set(["no", "never", "not", "nunca", "jamas", "jamás", "neither", "nor", "tampoco"]);
-  const nodesForConflict = (await getAllNodes()).filter(n => !n.label.startsWith("["));
+  const nodesForConflict = nodesAfterPrune.filter(n => !n.label.startsWith("["));
 
   for (let i = 0; i < nodesForConflict.length; i++) {
     for (let j = i + 1; j < nodesForConflict.length; j++) {
@@ -327,7 +344,7 @@ export async function runMaintenance(force = false): Promise<MaintenanceReport> 
       if (!a.embedding || !b.embedding) continue;
 
       const sim = cosineSimilarity(a.embedding, b.embedding);
-      if (sim < 0.82) continue; // High similarity required for potential conflict
+      if (sim < 0.82) continue;
 
       const tokensA = a.label.toLowerCase().split(/\s+/);
       const tokensB = b.label.toLowerCase().split(/\s+/);
@@ -336,9 +353,7 @@ export async function runMaintenance(force = false): Promise<MaintenanceReport> 
       const hasNegB = tokensB.some(t => NEGATION_WORDS.has(t));
 
       if (hasNegA !== hasNegB) {
-        // Potential contradiction detected
         const conflictLabel = `conflict:${a.label} VS ${b.label}`;
-        const { findOrCreateNode: createNode } = require("./graph");
         const conflictNode = await createNode(conflictLabel, null, 0.9, null, a.user_id, a.visibility); 
         
         await upsertEdge(conflictNode.id, a.id, "causal", 0.5, a.user_id);
@@ -349,32 +364,39 @@ export async function runMaintenance(force = false): Promise<MaintenanceReport> 
     }
   }
 
-  // ── Step 8: Curiosity Engine (Knowledge Gap Detection) ──────────────────
-  const nodesAfterConflict = await getAllNodes();
-  for (const node of nodesAfterConflict) {
+  // ── Step 9: Curiosity Engine ─────────────────────────────────────────────
+  process.stderr.write("[Maintenance] Step 9: Curiosity...\n");
+  for (const node of nodesAfterPrune) {
     if (node.label.startsWith("[") || node.label.startsWith("concept:") || node.label.startsWith("conflict:")) continue;
     
     const neighbors = adjacency.get(node.id) ?? [];
-    // Curiosity trigger: Important node with very few associations
     if (node.importance > 0.7 && neighbors.length < 2) {
       const baseLabel = node.label.length > 180 ? node.label.slice(0, 180) + '…' : node.label;
       const curiosityLabel = `curiosity:Tell me more about "${baseLabel}" to bridge knowledge gaps`;
-      const { findOrCreateNode: createNode } = require("./graph");
       const curiosityNode = await createNode(curiosityLabel, null, 0.4, null, node.user_id, node.visibility);
+      
       await upsertEdge(curiosityNode.id, node.id, "semantic", 0.3, node.user_id);
       report.hubs.push(curiosityLabel);
     }
   }
 
-  // (Step 8.5 removed as it was integrated into Step 4/5)
+  // ── Step 9.5: Batch Embedding Generation for New Hubs ─────────────────────
+  process.stderr.write("[Maintenance] Step 9.5: Hub Embeddings...\n");
+  const hubsWithoutEmbeddings = (await getAllNodes()).filter(n => n.embedding === null && (n.label.startsWith("concept:") || n.label.startsWith("conflict:") || n.label.startsWith("curiosity:")));
+  if (hubsWithoutEmbeddings.length > 0) {
+    const labels = hubsWithoutEmbeddings.map(h => h.label);
+    const { getEmbeddings } = require("./embeddings");
+    const embeddings = await getEmbeddings(labels);
+    for (let i = 0; i < hubsWithoutEmbeddings.length; i++) {
+      await updateNodeEmbedding(hubsWithoutEmbeddings[i].id, embeddings[i]);
+    }
+  }
 
-  // ── Step 9: Importance Re-calibration (Long-term utility) ────────────────
-  // Heuristic: If a node has high access count and was used across multiple days,
-  // it is objectively important regardless of its initial importance score.
-  for (const node of nodesAfterConflict) {
+  // ── Step 10: Importance Re-calibration ───────────────────────────────────
+  process.stderr.write("[Maintenance] Step 10: Re-calibration...\n");
+  for (const node of nodesAfterPrune) {
     const lifespanDays = (now - node.created_at) / (1000 * 60 * 60 * 24);
     if (lifespanDays > 1 && node.access_count > 5) {
-      // Boost importance based on sustained utility
       const utilityScore = Math.min(0.4, (node.access_count / lifespanDays) * 0.1);
       const newImportance = Math.min(1.0, (node.importance || 0.5) + utilityScore);
       if (newImportance > (node.importance || 0.5) + 0.05) {
@@ -385,6 +407,7 @@ export async function runMaintenance(force = false): Promise<MaintenanceReport> 
 
   await setMeta("last_maintenance", String(now));
   report.durationMs = Date.now() - start;
+  process.stderr.write(`[Maintenance] Complete in ${report.durationMs}ms.\n`);
   return report;
 }
 

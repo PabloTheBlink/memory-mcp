@@ -7,6 +7,7 @@ import {
   deleteEdge,
   setMeta,
 } from "./graph";
+import { cosineSimilarity } from "./embeddings";
 
 const NODE_DELETION_THRESHOLD = 0.05;
 const EDGE_DELETION_THRESHOLD = 0.05;
@@ -39,14 +40,12 @@ export async function consolidate(): Promise<ConsolidationStats> {
   stats.nodesProcessed = nodes.length;
 
   // ── Step 1.5: Interference (Inhibition) ─────────────────────────────
-  // Human memory suffers from interference: similar memories compete.
-  const similarPairs: Array<{ node: any; penalty: number }> = [];
+  const interferencePenalties = new Map<string, number>();
   for (let i = 0; i < nodes.length; i++) {
     for (let j = i + 1; j < nodes.length; j++) {
       const a = nodes[i], b = nodes[j];
       if (!a.embedding || !b.embedding) continue;
       
-      const { cosineSimilarity } = require("./embeddings");
       const sim = cosineSimilarity(a.embedding, b.embedding);
       if (sim > 0.85) {
         const aRecent = a.last_accessed_at;
@@ -54,7 +53,7 @@ export async function consolidate(): Promise<ConsolidationStats> {
         if (Math.abs(aRecent - bRecent) > 1000 * 60 * 60) {
           const [older, newer] = aRecent < bRecent ? [a, b] : [b, a];
           const penalty = 0.05 * (sim - 0.8) * 5; 
-          similarPairs.push({ node: older, penalty });
+          interferencePenalties.set(older.id, (interferencePenalties.get(older.id) ?? 0) + penalty);
         }
       }
     }
@@ -62,23 +61,15 @@ export async function consolidate(): Promise<ConsolidationStats> {
 
   for (const node of nodes) {
     const elapsedDays = (now - node.last_accessed_at) / (1000 * 60 * 60 * 24);
-    
-    // Human-like decay: Stability increases exponentially with repetitions (Spacing Effect).
-    // An SM-2 like approach where each access increases the interval (stability).
     const baseStability = Math.max(0.1, node.importance * 2.0);
     const spacingMultiplier = Math.pow(1.8, Math.min(node.access_count, 15));
     const stability = baseStability * spacingMultiplier;
     
     const retention = Math.exp(-elapsedDays / stability);
-    
-    // Base decayed strength
     let newStrength = node.strength * retention;
 
-    // Apply interference penalty if applicable
-    const interference = similarPairs.find(p => p.node.id === node.id);
-    if (interference) {
-      newStrength = Math.max(0, newStrength - interference.penalty);
-    }
+    const penalty = interferencePenalties.get(node.id) ?? 0;
+    newStrength = Math.max(0, newStrength - penalty);
 
     const effectiveDeletionThreshold = node.importance > 0.8 
       ? NODE_DELETION_THRESHOLD * 0.2 
@@ -88,10 +79,7 @@ export async function consolidate(): Promise<ConsolidationStats> {
       await deleteNode(node.id);
       stats.nodesDeleted++;
     } else {
-      // If the node was accessed very recently, we reinforce it based on its current decay state.
-      // Retrieving a memory that is close to being forgotten strengthens it more (Spacing Effect).
-      if (elapsedDays < 1.0 && node.access_count > 0 && !interference) {
-        // Inverse of retention: lower retention before recall means harder recall, thus higher boost.
+      if (elapsedDays < 1.0 && node.access_count > 0 && penalty === 0) {
         const retrievalEffort = 1.0 + (1.0 - retention);
         const reinforcement = STRENGTH_BOOST * (1.0 + node.importance) * retrievalEffort;
         newStrength = Math.min(1.0, newStrength + reinforcement);
@@ -121,7 +109,6 @@ export async function consolidate(): Promise<ConsolidationStats> {
       stats.edgesDecayed++;
     }
   }
-
 
   await setMeta("last_consolidation", String(now));
   return stats;
