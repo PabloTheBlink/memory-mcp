@@ -31,10 +31,12 @@ import {
   getMeta,
   getNeighbors,
   logEvent,
+  updateNodeLabel,
+  searchNodesByLabel,
+  deleteNode,
 } from "./graph";
 import { getEmbedding, getEmbeddings, findSimilar, cosineSimilarity } from "./embeddings";
 import { spreadActivation } from "./activation";
-import { consolidate } from "./decay";
 import { runMaintenance } from "./maintenance";
 import {
   getActiveContext,
@@ -132,11 +134,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         required: ["query"],
       },
     },
-    {
-      name: "memory_consolidate",
-      description: "Prune weak memories and apply Ebbinghaus decay.",
-      inputSchema: { type: "object", properties: {} },
-    },
+
     {
       name: "memory_status",
       description: "MANDATORIO: Ejecutar SIEMPRE al inicio de una nueva sesión para identificar el contexto activo, estadísticas del sistema y nodos principales de memoria.",
@@ -207,6 +205,51 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         "type": "object",
         "properties": {}
       },
+    },
+    {
+      "name": "memory_update_node",
+      "description": "Refine, rename or forget a concept. Use this to maintain memory accuracy and remove errors.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "label": { "type": "string", "description": "The current label of the node" },
+          "new_label": { "type": "string", "description": "Optional new label to rename the node" },
+          "importance": { "type": "number", "description": "Update importance (0-1)" },
+          "forget": { "type": "boolean", "description": "If true, permanently deletes the node and its connections" }
+        },
+        "required": ["label"]
+      }
+    },
+    {
+      "name": "memory_list_hubs",
+      "description": "List existing projects, contexts and high-level conceptual hubs.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "type": { "type": "string", "enum": ["projects", "contexts", "all"], "default": "all" }
+        }
+      }
+    },
+    {
+      "name": "memory_activate_batch",
+      "description": "Efficiently activate multiple concepts at once. Perfect for atomizing documents or project setups.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "concepts": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "concept": { "type": "string" },
+                "importance": { "type": "number", "default": 0.5 }
+              },
+              "required": ["concept"]
+            }
+          }
+        },
+        "required": ["concepts"]
+      }
     },
   ],
 })),
@@ -529,12 +572,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
       }
 
-      case "memory_consolidate": {
-        const stats = await consolidate();
-        return {
-          content: [{ type: "text", text: JSON.stringify({ consolidation: stats }) }],
-        };
-      }
 
       case "memory_maintenance": {
         const force = (args as any)?.force === true;
@@ -677,6 +714,87 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               total_context_nodes: neighbors.length
             }) 
           }],
+        };
+      }
+
+      case "memory_update_node": {
+        const { label, new_label, importance, forget } = args as any;
+        const deviceId = getDeviceId();
+        const node = (await getAllNodes(deviceId)).find(n => n.label === label);
+
+        if (!node) {
+          throw new Error(`Node not found: ${label}`);
+        }
+
+        if (forget) {
+          await deleteNode(node.id);
+          await logEvent(`Forgot node: ${label}`, deviceId);
+          return { content: [{ type: "text", text: JSON.stringify({ status: "forgotten", label }) }] };
+        }
+
+        if (new_label) {
+          await updateNodeLabel(node.id, new_label);
+          // Re-embed if label changed
+          const emb = await getEmbedding(new_label);
+          await updateNodeEmbedding(node.id, emb);
+          await logEvent(`Renamed node: ${label} -> ${new_label}`, deviceId);
+        }
+
+        if (importance !== undefined) {
+          await updateNodeImportance(node.id, importance);
+        }
+
+        return {
+          content: [{ type: "text", text: JSON.stringify({ status: "updated", label: new_label || label }) }],
+        };
+      }
+
+      case "memory_list_hubs": {
+        const { type = "all" } = args as any;
+        const deviceId = getDeviceId();
+        let hubs: string[] = [];
+
+        if (type === "projects" || type === "all") {
+          const nodes = await searchNodesByLabel("project:%", deviceId);
+          hubs.push(...nodes.map(n => n.label));
+        }
+        if (type === "contexts" || type === "all") {
+          const nodes = await searchNodesByLabel("[ctx:%", deviceId);
+          hubs.push(...nodes.map(n => n.label));
+        }
+        
+        // Add high-importance concepts
+        const topNodes = await getTopNodes(20, deviceId);
+        hubs.push(...topNodes.filter(n => n.importance > 0.8 && !hubs.includes(n.label)).map(n => n.label));
+
+        return {
+          content: [{ type: "text", text: JSON.stringify({ hubs: Array.from(new Set(hubs)) }) }],
+        };
+      }
+
+      case "memory_activate_batch": {
+        const { concepts } = args as any;
+        const deviceId = getDeviceId();
+        const activeContext = await getActiveContext();
+        const contextNodeId = await ensureContextNode(activeContext);
+        
+        const results = [];
+        for (const item of concepts) {
+          const { concept, importance = 0.5 } = item;
+          const node = await findOrCreateNode(concept, null, importance, null, deviceId, "private");
+          if (!node.embedding) {
+             const emb = await getEmbedding(concept);
+             await updateNodeEmbedding(node.id, emb);
+          }
+          await bindToContext(node.id, contextNodeId);
+          await touchNode(node.id);
+          results.push(concept);
+        }
+
+        await logEvent(`Batch activation of ${concepts.length} concepts`, deviceId);
+
+        return {
+          content: [{ type: "text", text: JSON.stringify({ activated: results, context: activeContext }) }],
         };
       }
 

@@ -129,6 +129,25 @@ export async function updateNodeImportance(id: string, importance: number): Prom
   await db.run("UPDATE nodes SET importance = ? WHERE id = ?", [importance, id]);
 }
 
+export async function updateNodeLabel(id: string, label: string): Promise<void> {
+  const db = await getDb();
+  await db.run("UPDATE nodes SET label = ? WHERE id = ?", [label, id]);
+}
+
+export async function searchNodesByLabel(pattern: string, userId?: string): Promise<MemoryNode[]> {
+  const db = await getDb();
+  let sql = "SELECT * FROM nodes WHERE label LIKE ?";
+  const params: any[] = [pattern];
+  
+  if (userId) {
+    sql += " AND (user_id = ? OR visibility = 'shared')";
+    params.push(userId);
+  }
+  
+  const rows = await db.queryAll(sql, params);
+  return rows.map(deserializeNode);
+}
+
 export async function updateNodeStrength(id: string, strength: number): Promise<void> {
   const db = await getDb();
   await db.run("UPDATE nodes SET strength = ? WHERE id = ?", [strength, id]);
