@@ -201,12 +201,25 @@ function renderBrain(): string {
     stroke-dasharray: none; 
     animation: none;
   }
-  .link.firing {
+  .node.firing circle, .node.firing path {
     stroke-opacity: 1;
     stroke-width: 3px;
     stroke: #fff !important;
     filter: url(#glow-white);
   }
+
+  /* Differential effect for contexts */
+  .node.context path {
+    stroke: #8b5cf6;
+    stroke-width: 2px;
+    animation: context-pulse 3s ease-in-out infinite;
+  }
+  @keyframes context-pulse {
+    0% { stroke-width: 2px; stroke-opacity: 0.4; }
+    50% { stroke-width: 5px; stroke-opacity: 0.9; }
+    100% { stroke-width: 2px; stroke-opacity: 0.4; }
+  }
+  .node.context text { opacity: 0.5; font-weight: 600; fill: #8b5cf6; }
 
   #info-panel {
     position: fixed; top: 20px; right: 20px;
@@ -316,6 +329,15 @@ function renderBrain(): string {
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js"></script>
 <script>
+const hexagon = (r) => {
+  const points = [];
+  for (let i = 0; i < 6; i++) {
+    const a = (Math.PI / 3) * i - Math.PI / 6;
+    points.push([r * Math.cos(a), r * Math.sin(a)]);
+  }
+  return 'M' + points.map(p => p.join(',')).join('L') + 'Z';
+};
+
 const W = window.innerWidth, H = window.innerHeight;
 const svg = d3.select('#graph').attr('viewBox', [0,0,W,H]);
 const container = svg.append('g');
@@ -490,17 +512,23 @@ async function update() {
   link = gLinks.selectAll('.link').data(links, d => \`\${d.source.id || d.source}-\${d.target.id || d.target}\`)
     .join('line').attr('class','link')
     .attr('stroke', d => linkColor(d.type))
-    .attr('stroke-width', d => Math.max(1.5, d.weight * 4));
+    .attr('stroke-width', d => d.type === 'abstraction' ? 4 : Math.max(1.5, d.weight * 4))
+    .attr('stroke-dasharray', d => d.type === 'abstraction' ? 'none' : '2, 8');
 
   node = gNodes.selectAll('.node').data(nodes, d => d.id)
     .join(
       enter => {
-        const g = enter.append('g').attr('class','node').attr('id', d => \`node-\${d.id}\`);
-        g.append('circle');
+        const g = enter.append('g').attr('class', d => 'node' + (d.isContext ? ' context' : ''));
+        g.attr('id', d => \`node-\${d.id}\`);
+        g.append('path').filter(d => d.isContext);
+        g.append('circle').filter(d => !d.isContext);
         g.append('text');
         return g;
       },
-      update => update,
+      update => {
+        update.attr('class', d => 'node' + (d.isContext ? ' context' : ''));
+        return update;
+      },
       exit => exit.transition().duration(500).style('opacity', 0).remove()
     )
     .call(d3.drag()
@@ -508,7 +536,7 @@ async function update() {
       .on('drag',  (e,d) => { d.fx=e.x; d.fy=e.y; })
       .on('end',   (e,d) => { if(!e.active) sim.alphaTarget(0); d.fx=null; d.fy=null; }));
 
-  node.select('circle')
+  node.filter(':not(.context)').select('circle')
     .attr('r', d => nodeRadius(d))
     .attr('fill', d => getNodeColor(d) + '44')
     .attr('stroke', 'none')
@@ -520,6 +548,11 @@ async function update() {
         const glowNames = ['blue','purple','orange','green','white','emerald'];
         return \`url(#glow-\${glowNames[paletteIndex % glowNames.length]})\`;
     });
+
+  node.filter('.context').select('path')
+    .attr('d', d => hexagon(nodeRadius(d)))
+    .attr('fill', d => getNodeColor(d) + '66')
+    .attr('filter', 'url(#glow-purple)');
 
   node.select('text')
     .attr('dy', d => -(nodeRadius(d) + 5))
